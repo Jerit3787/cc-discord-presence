@@ -22,6 +22,12 @@ Reliability fork ([Jerit3787/cc-discord-presence](https://github.com/Jerit3787/c
 - **Session count drift.** A tracked PID is now verified to still be a `claude`
   process before it is counted, so PID reuse no longer keeps ended sessions
   "active" and prevents the daemon from ever shutting down.
+- **Stale binary after an update.** `start.sh` only fetched the binary when it
+  was missing, so `plugin update` kept running the old one. It now tracks the
+  installed version and re-downloads (and restarts the daemon) on a mismatch.
+- **Blank status line** when enabling the statusline integration without an
+  existing `~/.claude/statusline.sh`. The wrapper now renders a default
+  "dir | model | cost" line.
 
 ### Changed
 - Model display names are derived from the model ID (e.g. `claude-sonnet-5` ->
