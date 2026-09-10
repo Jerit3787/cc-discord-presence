@@ -87,10 +87,14 @@ if [[ "$OS" == "windows" ]]; then
     BINARY_NAME="${BINARY_NAME}.exe"
 fi
 BINARY="$BIN_DIR/$BINARY_NAME"
+VERSION_FILE="$BIN_DIR/.version"
 
-# Download binary if not present
-if [[ ! -f "$BINARY" ]]; then
-    echo "Downloading cc-discord-presence for ${OS}-${ARCH}..."
+# Download the binary if it is missing or left over from a different version.
+# (Without the version check, `plugin update` never refreshes the binary
+# because the file already exists.)
+INSTALLED_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "")
+if [[ ! -f "$BINARY" || "$INSTALLED_VERSION" != "$VERSION" ]]; then
+    echo "Downloading cc-discord-presence ${VERSION} for ${OS}-${ARCH}..."
 
     DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}"
 
@@ -106,7 +110,22 @@ if [[ ! -f "$BINARY" ]]; then
     if ! $IS_WINDOWS; then
         chmod +x "$BINARY"
     fi
+    echo "$VERSION" > "$VERSION_FILE"
     echo "Downloaded successfully!"
+
+    # A newer binary is on disk; retire the running daemon so the next block
+    # starts the new one.
+    if [[ -f "$PID_FILE" ]]; then
+        OLD_DAEMON=$(cat "$PID_FILE")
+        if process_exists "$OLD_DAEMON"; then
+            if $IS_WINDOWS; then
+                taskkill //F //PID "$OLD_DAEMON" >/dev/null 2>&1 || true
+            else
+                kill "$OLD_DAEMON" 2>/dev/null || true
+            fi
+        fi
+        rm -f "$PID_FILE"
+    fi
 fi
 
 if [[ ! -f "$BINARY" ]]; then
