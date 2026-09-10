@@ -150,20 +150,24 @@ GOOS=windows GOARCH=amd64 go build -o bin/cc-discord-presence-windows-amd64.exe 
 
 ## Token Pricing
 
-Cost from the JSONL fallback is an **estimate**. Known model pricing (per 1M tokens):
+Cost from the JSONL fallback is an **estimate**. It uses first-party Claude API
+list pricing ([source](https://docs.anthropic.com/en/docs/about-claude/pricing)),
+per 1M tokens:
 
 | Model | Input | Output |
 |-------|-------|--------|
-| Opus 5 / 4.6 | $5.00 | $25.00 |
-| Opus 4.5 | $15.00 | $75.00 |
+| Opus 5 / 4.8 / 4.7 / 4.6 | $5.00 | $25.00 |
+| Opus 4.5 / 4.1 / 4 | $15.00 | $75.00 |
 | Sonnet 5 | $2.00 | $10.00 |
-| Sonnet 4.5 / 4.6 / 4 | $3.00 | $15.00 |
-| Haiku 4.5 / 5 | $1.00 | $5.00 |
-| _unknown_ | $3.00 | $15.00 |
+| Sonnet 4.6 / 4.5 / 4 | $3.00 | $15.00 |
+| Haiku 4.5 | $1.00 | $5.00 |
+| Fable 5 / 5.1 | $10.00 | $50.00 |
+| _unrecognized_ | $3.00 | $15.00 |
 
-Cache-read tokens are billed at 0.1× the input rate and cache-writes at 1.25×.
-Unknown model IDs fall back to the _unknown_ row. For exact figures, use the
-statusline integration (Claude Code's own cost number).
+Cache-read tokens are estimated at 0.1× the input rate and cache-writes at 1.25×
+(the 5-minute rate; 1-hour cache writes actually cost 2×, which the transcript
+doesn't distinguish). For exact figures, use the statusline integration — it
+reports Claude Code's own `total_cost_usd`.
 
 ## Advanced: Custom Discord App
 

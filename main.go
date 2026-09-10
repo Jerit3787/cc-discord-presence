@@ -37,24 +37,33 @@ const (
 	ReconnectInterval = 15 * time.Second
 )
 
-// Model pricing per million tokens. Keys are normalized model IDs (any
-// trailing -YYYYMMDD snapshot date is stripped before lookup, so
-// "claude-sonnet-4-5-20241022" and "claude-sonnet-4-5" share an entry).
-// Unknown models fall back to formatModelName's tier heuristic + defaultPricing.
-// Update when new models are released: https://www.anthropic.com/pricing
+// modelPricing is first-party Claude API list pricing in USD per million tokens
+// (input, output). Keys are normalized model IDs: any trailing -YYYYMMDD
+// snapshot date is stripped before lookup, so "claude-sonnet-4-5-20241022" and
+// "claude-sonnet-4-5" share an entry. Unknown IDs fall back to defaultPricing.
+// Source: https://docs.anthropic.com/en/docs/about-claude/pricing
 var modelPricing = map[string]struct{ Input, Output float64 }{
-	"claude-opus-4-5":   {15.0, 75.0},
-	"claude-sonnet-4-5": {3.0, 15.0},
-	"claude-sonnet-4":   {3.0, 15.0},
-	"claude-haiku-4-5":  {1.0, 5.0},
-	"claude-opus-4-6":   {5.0, 25.0},
-	"claude-sonnet-4-6": {3.0, 15.0},
+	// Current generation
 	"claude-opus-5":     {5.0, 25.0},
 	"claude-sonnet-5":   {2.0, 10.0},
-	"claude-haiku-5":    {1.0, 5.0},
+	"claude-haiku-4-5":  {1.0, 5.0},
+	"claude-fable-5":    {10.0, 50.0},
+	"claude-fable-5-1":  {10.0, 50.0},
+	"claude-opus-4-8":   {5.0, 25.0},
+	"claude-opus-4-7":   {5.0, 25.0},
+	"claude-opus-4-6":   {5.0, 25.0},
+	"claude-sonnet-4-6": {3.0, 15.0},
+	// Previous generation
+	"claude-opus-4-5":   {15.0, 75.0},
+	"claude-opus-4-1":   {15.0, 75.0},
+	"claude-opus-4":     {15.0, 75.0},
+	"claude-sonnet-4-5": {3.0, 15.0},
+	"claude-sonnet-4":   {3.0, 15.0},
+	"claude-haiku-3-5":  {0.8, 4.0},
 }
 
-// defaultPricing is used when a model ID matches no known entry.
+// defaultPricing is used when a model ID matches no known entry. Sonnet-tier
+// rates are the least-surprising middle ground for an unrecognized model.
 var defaultPricing = struct{ Input, Output float64 }{3.0, 15.0}
 
 // modelDisplayNames overrides the tier heuristic for specific normalized IDs.
