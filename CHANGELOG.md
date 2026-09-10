@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-09-10
+
+Reliability fork ([Jerit3787/cc-discord-presence](https://github.com/Jerit3787/cc-discord-presence)).
+
+### Fixed
+- **Presence flickering between projects** when several Claude Code sessions run
+  at once. Selection is now sticky: the displayed session only changes after the
+  current one has been quiet (no transcript writes) for 75s, then switches to
+  whichever session is now most active.
+- **Daemon exited permanently when Discord was not running** at session start
+  (`os.Exit(1)`). It now retries the connection every 15s, and reconnects
+  automatically if the IPC pipe breaks mid-session (Discord quit/restarted).
+- **Session count drift.** A tracked PID is now verified to still be a `claude`
+  process before it is counted, so PID reuse no longer keeps ended sessions
+  "active" and prevents the daemon from ever shutting down.
+
+### Changed
+- Model display names are derived from the model ID (e.g. `claude-sonnet-5` ->
+  "Sonnet 5") instead of a hardcoded table that goes stale on every release.
+  Added current-generation pricing entries.
+- JSONL fallback now includes cache-read and cache-creation tokens in the token
+  count, and prices them relative to the input rate, for a closer cost estimate.
+- Discord elapsed timer uses the real session start (first transcript timestamp)
+  rather than daemon uptime.
+
 ## [1.0.3] - 2026-01-20
 
 ### Added

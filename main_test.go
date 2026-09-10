@@ -10,11 +10,13 @@ import (
 // TestCalculateCost tests the cost calculation logic
 func TestCalculateCost(t *testing.T) {
 	tests := []struct {
-		name         string
-		modelID      string
-		inputTokens  int64
-		outputTokens int64
-		wantCost     float64
+		name          string
+		modelID       string
+		inputTokens   int64
+		outputTokens  int64
+		cacheRead     int64
+		cacheCreation int64
+		wantCost      float64
 	}{
 		{
 			name:         "Opus 4.5 - basic usage",
@@ -22,6 +24,21 @@ func TestCalculateCost(t *testing.T) {
 			inputTokens:  1_000_000,
 			outputTokens: 100_000,
 			wantCost:     15.0 + 7.5, // $15/M input + $75/M * 0.1 output
+		},
+		{
+			name:          "Cache tokens priced off input rate",
+			modelID:       "claude-sonnet-4-5-20241022",
+			inputTokens:   0,
+			outputTokens:  0,
+			cacheRead:     1_000_000, // $3/M * 0.1 = 0.30
+			cacheCreation: 1_000_000, // $3/M * 1.25 = 3.75
+			wantCost:      0.30 + 3.75,
+		},
+		{
+			name:        "Unversioned current model ID",
+			modelID:     "claude-sonnet-5",
+			inputTokens: 1_000_000,
+			wantCost:    2.0, // $2/M input
 		},
 		{
 			name:         "Sonnet 4.5 - basic usage",
@@ -69,10 +86,10 @@ func TestCalculateCost(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := calculateCost(tt.modelID, tt.inputTokens, tt.outputTokens)
+			got := calculateCost(tt.modelID, tt.inputTokens, tt.outputTokens, tt.cacheRead, tt.cacheCreation)
 			// Use approximate comparison for floating point
 			if diff := got - tt.wantCost; diff > 0.0001 || diff < -0.0001 {
-				t.Errorf("calculateCost(%q, %d, %d) = %v, want %v", tt.modelID, tt.inputTokens, tt.outputTokens, got, tt.wantCost)
+				t.Errorf("calculateCost(%q, %d, %d, %d, %d) = %v, want %v", tt.modelID, tt.inputTokens, tt.outputTokens, tt.cacheRead, tt.cacheCreation, got, tt.wantCost)
 			}
 		})
 	}
@@ -106,19 +123,24 @@ func TestFormatModelName(t *testing.T) {
 			want:    "Haiku 4.5",
 		},
 		{
-			name:    "Unknown opus model - fallback",
+			name:    "Newer model - version derived from ID",
 			modelID: "claude-opus-5-20260101",
-			want:    "Opus",
+			want:    "Opus 5",
 		},
 		{
-			name:    "Unknown sonnet model - fallback",
-			modelID: "claude-sonnet-5-20260101",
-			want:    "Sonnet",
+			name:    "Newer model - unversioned ID",
+			modelID: "claude-sonnet-5",
+			want:    "Sonnet 5",
 		},
 		{
-			name:    "Unknown haiku model - fallback",
+			name:    "Newer haiku model",
 			modelID: "claude-haiku-5-20260101",
-			want:    "Haiku",
+			want:    "Haiku 5",
+		},
+		{
+			name:    "Tier only, no parseable version",
+			modelID: "claude-opus",
+			want:    "Opus",
 		},
 		{
 			name:    "Completely unknown model - defaults to Claude",
@@ -545,19 +567,76 @@ func TestFindMostRecentJSONL(t *testing.T) {
 	})
 }
 
-// TestModelPricingConsistency ensures model pricing and display names are in sync
+// TestPickJSONLSession verifies the sticky/debounced session selection.
+func TestPickJSONLSession(t *testing.T) {
+	origProjectsDir := projectsDir
+	origShownKey := shownKey
+	defer func() {
+		projectsDir = origProjectsDir
+		shownKey = origShownKey
+	}()
+
+	tmpDir, err := os.MkdirTemp("", "cc-discord-presence-pick")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	projectsDir = tmpDir
+
+	mkSession := func(project, name string, age time.Duration) string {
+		dir := filepath.Join(tmpDir, project)
+		os.MkdirAll(dir, 0755)
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte(`{"type":"user"}`), 0644)
+		mt := time.Now().Add(-age)
+		os.Chtimes(p, mt, mt)
+		return p
+	}
+
+	sessionA := mkSession("-Users-test-projA", "a.jsonl", 2*time.Second)
+	sessionB := mkSession("-Users-test-projB", "b.jsonl", 30*time.Second)
+
+	// Nothing shown yet -> newest (A) wins.
+	shownKey = ""
+	if got, _, _ := pickJSONLSession(); got != sessionA {
+		t.Fatalf("fresh pick = %q, want %q", got, sessionA)
+	}
+
+	// A is shown and still recently active -> stays on A even though we now make
+	// B the most recent.
+	os.Chtimes(sessionB, time.Now(), time.Now())
+	shownKey = "jl:" + sessionA
+	if got, _, _ := pickJSONLSession(); got != sessionA {
+		t.Fatalf("sticky pick = %q, want %q (should not flip to newer B)", got, sessionA)
+	}
+
+	// A goes quiet past the threshold -> switch to the now-active B.
+	stale := time.Now().Add(-2 * StickyQuietPeriod)
+	os.Chtimes(sessionA, stale, stale)
+	os.Chtimes(sessionB, time.Now(), time.Now())
+	shownKey = "jl:" + sessionA
+	if got, _, _ := pickJSONLSession(); got != sessionB {
+		t.Fatalf("stale pick = %q, want %q (should flip after quiet period)", got, sessionB)
+	}
+}
+
+// TestModelPricingConsistency ensures every priced model resolves to a specific
+// display name (not the generic "Claude" fallback), and that pricing keys are
+// already in normalized (date-stripped) form.
 func TestModelPricingConsistency(t *testing.T) {
-	// All models in pricing should have display names
 	for modelID := range modelPricing {
-		if _, ok := modelDisplayNames[modelID]; !ok {
-			t.Errorf("Model %q has pricing but no display name", modelID)
+		if got := normalizeModelID(modelID); got != modelID {
+			t.Errorf("pricing key %q is not normalized (got %q)", modelID, got)
+		}
+		if name := formatModelName(modelID); name == "Claude" {
+			t.Errorf("priced model %q resolves to generic display name", modelID)
 		}
 	}
 
-	// All models in display names should have pricing
+	// Display-name overrides must also have pricing.
 	for modelID := range modelDisplayNames {
 		if _, ok := modelPricing[modelID]; !ok {
-			t.Errorf("Model %q has display name but no pricing", modelID)
+			t.Errorf("Model %q has display name override but no pricing", modelID)
 		}
 	}
 }

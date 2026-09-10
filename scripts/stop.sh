@@ -34,6 +34,15 @@ kill_process() {
     fi
 }
 
+# A tracked session counts as live only if its PID is still a Claude Code
+# process (guards against PID reuse keeping ended sessions "active").
+session_alive() {
+    local pid=$1
+    process_exists "$pid" || return 1
+    $IS_WINDOWS && return 0
+    ps -p "$pid" -o command= 2>/dev/null | grep -qi "claude"
+}
+
 # Session tracking: Windows uses refcount, Unix uses PID files
 if $IS_WINDOWS; then
     CURRENT_COUNT=$(cat "$REFCOUNT_FILE" 2>/dev/null || echo "1")
@@ -56,7 +65,7 @@ else
         for session_file in "$SESSIONS_DIR"/*; do
             [[ -f "$session_file" ]] || continue
             pid=$(basename "$session_file")
-            if process_exists "$pid"; then
+            if session_alive "$pid"; then
                 ACTIVE_SESSIONS=$((ACTIVE_SESSIONS + 1))
             else
                 rm -f "$session_file"

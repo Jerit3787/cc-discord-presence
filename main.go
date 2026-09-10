@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -24,23 +25,62 @@ const (
 
 	// Polling interval as fallback
 	PollInterval = 3 * time.Second
+
+	// StickyQuietPeriod is how long the currently displayed session must go
+	// without transcript activity before the presence switches to a different
+	// (more recently active) session. Prevents the presence from flickering
+	// between projects when several Claude Code sessions run at once.
+	StickyQuietPeriod = 75 * time.Second
+
+	// ReconnectInterval is how long to wait between attempts to (re)connect to
+	// Discord when it is not reachable.
+	ReconnectInterval = 15 * time.Second
 )
 
-// Model pricing per million tokens (December 2025)
-// Update these when new models are released: https://www.anthropic.com/pricing
+// modelPricing is first-party Claude API list pricing in USD per million tokens
+// (input, output). Keys are normalized model IDs: any trailing -YYYYMMDD
+// snapshot date is stripped before lookup, so "claude-sonnet-4-5-20241022" and
+// "claude-sonnet-4-5" share an entry. Unknown IDs fall back to defaultPricing.
+// Source: https://docs.anthropic.com/en/docs/about-claude/pricing
 var modelPricing = map[string]struct{ Input, Output float64 }{
-	"claude-opus-4-5-20251101":   {15.0, 75.0},
-	"claude-sonnet-4-5-20241022": {3.0, 15.0},
-	"claude-sonnet-4-20250514":   {3.0, 15.0},
-	"claude-haiku-4-5-20241022":  {1.0, 5.0},
+	// Current generation
+	"claude-opus-5":     {5.0, 25.0},
+	"claude-sonnet-5":   {2.0, 10.0},
+	"claude-haiku-4-5":  {1.0, 5.0},
+	"claude-fable-5":    {10.0, 50.0},
+	"claude-fable-5-1":  {10.0, 50.0},
+	"claude-opus-4-8":   {5.0, 25.0},
+	"claude-opus-4-7":   {5.0, 25.0},
+	"claude-opus-4-6":   {5.0, 25.0},
+	"claude-sonnet-4-6": {3.0, 15.0},
+	// Previous generation
+	"claude-opus-4-5":   {15.0, 75.0},
+	"claude-opus-4-1":   {15.0, 75.0},
+	"claude-opus-4":     {15.0, 75.0},
+	"claude-sonnet-4-5": {3.0, 15.0},
+	"claude-sonnet-4":   {3.0, 15.0},
+	"claude-haiku-3-5":  {0.8, 4.0},
 }
 
-// Model display names - add new model IDs here when released
+// defaultPricing is used when a model ID matches no known entry. Sonnet-tier
+// rates are the least-surprising middle ground for an unrecognized model.
+var defaultPricing = struct{ Input, Output float64 }{3.0, 15.0}
+
+// modelDisplayNames overrides the tier heuristic for specific normalized IDs.
 var modelDisplayNames = map[string]string{
-	"claude-opus-4-5-20251101":   "Opus 4.5",
-	"claude-sonnet-4-5-20241022": "Sonnet 4.5",
-	"claude-sonnet-4-20250514":   "Sonnet 4",
-	"claude-haiku-4-5-20241022":  "Haiku 4.5",
+	"claude-sonnet-4": "Sonnet 4",
+}
+
+// modelIDDatePattern matches a trailing 8-digit snapshot date, e.g. "-20241022".
+var modelIDDatePattern = regexp.MustCompile(`-\d{8}$`)
+
+// modelTierPattern extracts "<tier> <major>[.<minor>]" from a model ID,
+// e.g. "claude-sonnet-4-5-20241022" -> sonnet, 4, 5.
+var modelTierPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?`)
+
+// normalizeModelID strips a trailing -YYYYMMDD snapshot date.
+func normalizeModelID(modelID string) string {
+	return modelIDDatePattern.ReplaceAllString(modelID, "")
 }
 
 // StatusLineData matches Claude Code's statusline JSON structure
@@ -85,8 +125,10 @@ type JSONLMessage struct {
 	Message   struct {
 		Model string `json:"model"`
 		Usage struct {
-			InputTokens  int64 `json:"input_tokens"`
-			OutputTokens int64 `json:"output_tokens"`
+			InputTokens         int64 `json:"input_tokens"`
+			OutputTokens        int64 `json:"output_tokens"`
+			CacheReadTokens     int64 `json:"cache_read_input_tokens"`
+			CacheCreationTokens int64 `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 }
@@ -99,7 +141,23 @@ var (
 	discordClient    *discord.Client
 	usingFallback    bool
 	nudgeShown       bool
+
+	// shownKey identifies the session currently on the presence ("sl:<id>" for
+	// statusline data, "jl:<path>" for a JSONL transcript). shownSince is when
+	// that session first took the presence, used for the Discord elapsed timer.
+	shownKey   string
+	shownSince time.Time
 )
+
+// markShown records which session is on the presence. When the session changes
+// it resets the elapsed timer; otherwise it returns the existing start time.
+func markShown(key string) time.Time {
+	if key != shownKey {
+		shownKey = key
+		shownSince = time.Now()
+	}
+	return shownSince
+}
 
 func init() {
 	home, err := os.UserHomeDir()
@@ -119,16 +177,6 @@ func main() {
 ║     Show your Claude Code session on Discord!             ║
 ╚═══════════════════════════════════════════════════════════╝`)
 
-	// Connect to Discord
-	fmt.Println("🔗 Connecting to Discord...")
-	discordClient = discord.NewClient(ClientID)
-	if err := discordClient.Connect(); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to connect to Discord: %v\n", err)
-		fmt.Fprintln(os.Stderr, "   Make sure Discord is running and try again.")
-		os.Exit(1)
-	}
-	fmt.Println("✓ Discord RPC connected!")
-
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -136,9 +184,26 @@ func main() {
 	go func() {
 		<-sigChan
 		fmt.Println("\n⏹ Shutting down...")
-		discordClient.Close()
+		if discordClient != nil {
+			discordClient.Close()
+		}
 		os.Exit(0)
 	}()
+
+	// Connect to Discord, retrying until it is reachable. Claude Code is often
+	// launched before Discord; exiting here would leave the presence dead for
+	// the rest of the session.
+	fmt.Println("🔗 Connecting to Discord...")
+	discordClient = discord.NewClient(ClientID)
+	for attempt := 1; ; attempt++ {
+		if err := discordClient.Connect(); err == nil {
+			break
+		} else if attempt == 1 {
+			fmt.Fprintf(os.Stderr, "⏳ Discord not reachable (%v); retrying every %s...\n", err, ReconnectInterval)
+		}
+		time.Sleep(ReconnectInterval)
+	}
+	fmt.Println("✓ Discord RPC connected!")
 
 	// Try initial read and show data source
 	if session := readSessionData(); session != nil {
@@ -183,14 +248,19 @@ func readStatusLineData() *SessionData {
 		projectName = "Unknown Project"
 	}
 
+	modelName := statusLine.Model.DisplayName
+	if modelName == "" {
+		modelName = formatModelName(statusLine.Model.ID)
+	}
+
 	return &SessionData{
 		ProjectName: projectName,
 		ProjectPath: projectPath,
 		GitBranch:   getGitBranch(projectPath),
-		ModelName:   statusLine.Model.DisplayName,
+		ModelName:   modelName,
 		TotalTokens: statusLine.ContextWindow.TotalInputTokens + statusLine.ContextWindow.TotalOutputTokens,
 		TotalCost:   statusLine.Cost.TotalCostUSD,
-		StartTime:   sessionStartTime,
+		StartTime:   markShown("sl:" + statusLine.SessionID),
 	}
 }
 
@@ -219,19 +289,22 @@ func getGitBranch(projectPath string) string {
 	return branch
 }
 
-// findMostRecentJSONL finds the most recently modified JSONL file in ~/.claude/projects/
-func findMostRecentJSONL() (string, string, error) {
+// jsonlSession is one Claude Code transcript file with its decoded project path
+// and last-modified time.
+type jsonlSession struct {
+	path        string
+	projectPath string
+	modTime     time.Time
+}
+
+// listJSONLSessions returns every transcript under ~/.claude/projects/, sorted
+// most-recently-modified first.
+func listJSONLSessions() ([]jsonlSession, error) {
 	if _, err := os.Stat(projectsDir); os.IsNotExist(err) {
-		return "", "", fmt.Errorf("projects directory does not exist")
+		return nil, fmt.Errorf("projects directory does not exist")
 	}
 
-	type jsonlFile struct {
-		path        string
-		projectPath string
-		modTime     time.Time
-	}
-
-	var files []jsonlFile
+	var files []jsonlSession
 
 	err := filepath.WalkDir(projectsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -267,7 +340,7 @@ func findMostRecentJSONL() (string, string, error) {
 		// Restore literal dashes from placeholder
 		projectPath = strings.ReplaceAll(projectPath, "\x00", "-")
 
-		files = append(files, jsonlFile{
+		files = append(files, jsonlSession{
 			path:        path,
 			projectPath: projectPath,
 			modTime:     info.ModTime(),
@@ -277,11 +350,11 @@ func findMostRecentJSONL() (string, string, error) {
 	})
 
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
 	if len(files) == 0 {
-		return "", "", fmt.Errorf("no JSONL files found")
+		return nil, fmt.Errorf("no JSONL files found")
 	}
 
 	// Sort by modification time, most recent first
@@ -289,7 +362,47 @@ func findMostRecentJSONL() (string, string, error) {
 		return files[i].modTime.After(files[j].modTime)
 	})
 
+	return files, nil
+}
+
+// findMostRecentJSONL returns the single most recently modified transcript.
+func findMostRecentJSONL() (string, string, error) {
+	files, err := listJSONLSessions()
+	if err != nil {
+		return "", "", err
+	}
 	return files[0].path, files[0].projectPath, nil
+}
+
+// pickJSONLSession chooses which transcript to display, applying a stickiness
+// rule: keep showing the session already on the presence until it has gone
+// quiet for StickyQuietPeriod, then switch to whichever session is now most
+// active. This stops the presence flickering between projects when several
+// Claude Code sessions run concurrently.
+func pickJSONLSession() (string, string, error) {
+	files, err := listJSONLSessions()
+	if err != nil {
+		return "", "", err
+	}
+
+	newest := files[0]
+
+	// Is the currently displayed session still one of the known transcripts?
+	if strings.HasPrefix(shownKey, "jl:") {
+		currentPath := strings.TrimPrefix(shownKey, "jl:")
+		for _, f := range files {
+			if f.path != currentPath {
+				continue
+			}
+			// Keep the current session unless it has been quiet too long.
+			if time.Since(f.modTime) < StickyQuietPeriod {
+				return f.path, f.projectPath, nil
+			}
+			break
+		}
+	}
+
+	return newest.path, newest.projectPath, nil
 }
 
 // parseJSONLSession parses a JSONL file and extracts session data
@@ -301,10 +414,13 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 	defer file.Close()
 
 	var (
-		totalInputTokens  int64
-		totalOutputTokens int64
-		lastModel         string
-		projectPath       string
+		totalInputTokens   int64
+		totalOutputTokens  int64
+		totalCacheRead     int64
+		totalCacheCreation int64
+		lastModel          string
+		projectPath        string
+		firstTimestamp     string
 	)
 
 	scanner := bufio.NewScanner(file)
@@ -318,6 +434,10 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 			continue
 		}
 
+		if firstTimestamp == "" && msg.Timestamp != "" {
+			firstTimestamp = msg.Timestamp
+		}
+
 		// Extract cwd from any message that has it (usually first message)
 		if msg.Cwd != "" && projectPath == "" {
 			projectPath = msg.Cwd
@@ -328,6 +448,8 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 			lastModel = msg.Message.Model
 			totalInputTokens += msg.Message.Usage.InputTokens
 			totalOutputTokens += msg.Message.Usage.OutputTokens
+			totalCacheRead += msg.Message.Usage.CacheReadTokens
+			totalCacheCreation += msg.Message.Usage.CacheCreationTokens
 		}
 	}
 
@@ -335,10 +457,7 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 		return nil
 	}
 
-	// Calculate cost based on model pricing
-	totalCost := calculateCost(lastModel, totalInputTokens, totalOutputTokens)
-
-	// Get display name for model
+	totalCost := calculateCost(lastModel, totalInputTokens, totalOutputTokens, totalCacheRead, totalCacheCreation)
 	modelName := formatModelName(lastModel)
 
 	projectName := filepath.Base(projectPath)
@@ -346,48 +465,77 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 		projectName = "Unknown Project"
 	}
 
-	// Use daemon start time for elapsed time display
-	// This shows how long Discord presence has been active, not total session time
+	// Elapsed time: prefer the real session start (first transcript timestamp).
+	// A zero StartTime tells the caller to substitute the presence-takeover time.
+	var startTime time.Time
+	if firstTimestamp != "" {
+		if t, err := time.Parse(time.RFC3339, firstTimestamp); err == nil {
+			startTime = t
+		}
+	}
+
 	return &SessionData{
 		ProjectName: projectName,
 		ProjectPath: projectPath,
 		GitBranch:   getGitBranch(projectPath),
 		ModelName:   modelName,
-		TotalTokens: totalInputTokens + totalOutputTokens,
+		TotalTokens: totalInputTokens + totalOutputTokens + totalCacheRead + totalCacheCreation,
 		TotalCost:   totalCost,
-		StartTime:   sessionStartTime,
+		StartTime:   startTime,
 	}
 }
 
-// calculateCost calculates the cost based on token usage and model pricing
-func calculateCost(modelID string, inputTokens, outputTokens int64) float64 {
-	pricing, ok := modelPricing[modelID]
+// Cache pricing multipliers relative to base input price (Anthropic pricing):
+// reads are billed at 0.1x, 5-minute cache writes at 1.25x.
+const (
+	cacheReadMultiplier     = 0.1
+	cacheCreationMultiplier = 1.25
+)
+
+// calculateCost estimates session cost from token usage and model pricing.
+// Cache reads and cache-creation tokens are priced relative to the input rate.
+func calculateCost(modelID string, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int64) float64 {
+	pricing, ok := modelPricing[normalizeModelID(modelID)]
 	if !ok {
-		// Default to Sonnet 4 pricing if unknown model
-		pricing = modelPricing["claude-sonnet-4-20250514"]
+		pricing = defaultPricing
 	}
 
-	inputCost := float64(inputTokens) / 1_000_000 * pricing.Input
-	outputCost := float64(outputTokens) / 1_000_000 * pricing.Output
+	const perMillion = 1_000_000.0
+	cost := float64(inputTokens) / perMillion * pricing.Input
+	cost += float64(outputTokens) / perMillion * pricing.Output
+	cost += float64(cacheReadTokens) / perMillion * pricing.Input * cacheReadMultiplier
+	cost += float64(cacheCreationTokens) / perMillion * pricing.Input * cacheCreationMultiplier
 
-	return inputCost + outputCost
+	return cost
 }
 
-// formatModelName converts model ID to display name
+// formatModelName converts a model ID to a display name, e.g.
+// "claude-sonnet-4-5-20241022" -> "Sonnet 4.5", "claude-opus-5" -> "Opus 5".
 func formatModelName(modelID string) string {
-	if name, ok := modelDisplayNames[modelID]; ok {
+	normalized := normalizeModelID(modelID)
+	if name, ok := modelDisplayNames[normalized]; ok {
 		return name
 	}
 
-	// Try to extract a reasonable name from the model ID
-	if strings.Contains(modelID, "opus") {
+	if m := modelTierPattern.FindStringSubmatch(normalized); m != nil {
+		tier := strings.ToUpper(m[1][:1]) + m[1][1:]
+		version := m[2]
+		if m[3] != "" {
+			version += "." + m[3]
+		}
+		return tier + " " + version
+	}
+
+	// Last-resort tier-only fallback.
+	switch {
+	case strings.Contains(normalized, "opus"):
 		return "Opus"
-	}
-	if strings.Contains(modelID, "sonnet") {
+	case strings.Contains(normalized, "sonnet"):
 		return "Sonnet"
-	}
-	if strings.Contains(modelID, "haiku") {
+	case strings.Contains(normalized, "haiku"):
 		return "Haiku"
+	case strings.Contains(normalized, "fable"):
+		return "Fable"
 	}
 
 	return "Claude"
@@ -404,8 +552,8 @@ func readSessionData() *SessionData {
 		return data
 	}
 
-	// Fall back to JSONL parsing
-	jsonlPath, projectPath, err := findMostRecentJSONL()
+	// Fall back to JSONL parsing, with sticky session selection.
+	jsonlPath, projectPath, err := pickJSONLSession()
 	if err != nil {
 		return nil
 	}
@@ -414,10 +562,21 @@ func readSessionData() *SessionData {
 		usingFallback = true
 		nudgeShown = true
 		fmt.Println("\n💡 Tip: For more accurate token/cost data, configure the statusline wrapper.")
-		fmt.Println("   See: https://github.com/tsanva/cc-discord-presence#statusline-setup")
+		fmt.Println("   See: https://github.com/Jerit3787/cc-discord-presence#statusline-setup")
 	}
 
-	return parseJSONLSession(jsonlPath, projectPath)
+	session := parseJSONLSession(jsonlPath, projectPath)
+	if session == nil {
+		return nil
+	}
+
+	// Record which session now holds the presence; use the takeover time for the
+	// elapsed timer when the transcript had no parseable start timestamp.
+	takeover := markShown("jl:" + jsonlPath)
+	if session.StartTime.IsZero() {
+		session.StartTime = takeover
+	}
+	return session
 }
 
 func updatePresence(session *SessionData) {
@@ -433,13 +592,26 @@ func updatePresence(session *SessionData) {
 		formatNumber(session.TotalTokens),
 		session.TotalCost)
 
-	if err := discordClient.SetActivity(discord.Activity{
+	activity := discord.Activity{
 		Details:   details,
 		State:     state,
 		LargeText: "Clawd Code - Discord Rich Presence for Claude Code",
 		StartTime: &session.StartTime,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Error updating presence: %v\n", err)
+	}
+
+	if err := discordClient.SetActivity(activity); err != nil {
+		// The IPC pipe breaks when Discord is quit or restarted. Try to
+		// reconnect once and resend, rather than going silent until the next
+		// Claude Code session starts.
+		fmt.Fprintf(os.Stderr, "Presence update failed (%v); reconnecting to Discord...\n", err)
+		if rerr := discordClient.Reconnect(); rerr != nil {
+			fmt.Fprintf(os.Stderr, "Reconnect failed: %v\n", rerr)
+			return
+		}
+		fmt.Println("✓ Reconnected to Discord")
+		if err := discordClient.SetActivity(activity); err != nil {
+			fmt.Fprintf(os.Stderr, "Error updating presence after reconnect: %v\n", err)
+		}
 	}
 }
 
