@@ -1,17 +1,17 @@
 {
   "name": "cc-discord-presence",
   "owner": {
-    "name": "tsanva"
+    "name": "Jerit3787"
   },
   "metadata": {
-    "description": "Discord Rich Presence for Claude Code"
+    "description": "Discord Rich Presence for Claude Code (reliability fork)"
   },
   "plugins": [
     {
       "name": "cc-discord-presence",
       "source": "./",
       "description": "Show your Claude Code session on Discord with real-time project, model, tokens, and cost info",
-      "version": "1.0.2"
+      "version": "1.0.4"
     }
   ]
 }

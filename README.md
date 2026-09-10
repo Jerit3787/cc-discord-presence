@@ -2,6 +2,12 @@
 
 Show your Claude Code session on Discord! Display your current project, git branch, model, session time, token usage, and cost in real-time.
 
+> **Reliability fork** of [tsanva/cc-discord-presence](https://github.com/tsanva/cc-discord-presence).
+> Adds sticky session selection (no more flickering between projects when
+> multiple Claude Code sessions run at once), automatic Discord reconnect, a
+> self-healing session counter, and model names derived from the model ID.
+> See the [changelog](CHANGELOG.md#104---2026-09-10).
+
 ## Platform Support
 
 | Platform | Status |
@@ -13,7 +19,7 @@ Show your Claude Code session on Discord! Display your current project, git bran
 | Windows (x64) | ✅ Tested |
 | Windows (ARM64) | ⚠️ Untested |
 
-> **Note**: macOS Intel and Linux should work but haven't been verified. Please [report problems](https://github.com/tsanva/cc-discord-presence/issues).
+> **Note**: macOS Intel and Linux should work but haven't been verified. Please [report problems](https://github.com/Jerit3787/cc-discord-presence/issues).
 >
 > **Windows users**: Requires [Git Bash](https://git-scm.com/downloads) (included with Git for Windows) for automatic plugin hooks. Alternatively, run the PowerShell scripts manually (`scripts/start.ps1` and `scripts/stop.ps1`). WSL won't work as Discord runs on the Windows host.
 
@@ -22,7 +28,7 @@ Show your Claude Code session on Discord! Display your current project, git bran
 - **Session Time** - Shows how long you've been coding with Claude
 - **Project Name** - Displays the current project you're working on
 - **Git Branch** - Shows your current git branch
-- **Model Name** - Shows which Claude model you're using (Opus 4.5, Sonnet 4.5, Haiku 4.5)
+- **Model Name** - Shows which Claude model you're using (derived from the model ID, e.g. "Sonnet 5")
 - **Total Tokens** - Token usage counter (input + output)
 - **Total Cost** - Real-time cost tracking for your session
 
@@ -32,7 +38,7 @@ Show your Claude Code session on Discord! Display your current project, git bran
 
 ```bash
 # Add the marketplace
-claude plugin marketplace add tsanva/cc-discord-presence
+claude plugin marketplace add Jerit3787/cc-discord-presence
 
 # Install the plugin
 claude plugin install cc-discord-presence@cc-discord-presence
@@ -44,7 +50,7 @@ That's it! The plugin will automatically start when you begin a Claude Code sess
 
 ```bash
 # Clone and build
-git clone https://github.com/tsanva/cc-discord-presence.git
+git clone https://github.com/Jerit3787/cc-discord-presence.git
 cd cc-discord-presence
 go build -o cc-discord-presence .
 
@@ -116,7 +122,7 @@ You'll see one of:
 ┌─────────────────────────────────┐
 │ Clawd Code                      │
 │ Working on: my-project (main)   │
-│ Opus 4.5 | 1.5M tokens | $0.1234│
+│ Sonnet 5 | 1.5M tokens | $0.1234│
 │ 00:45:30 elapsed                │
 └─────────────────────────────────┘
 ```
@@ -144,14 +150,20 @@ GOOS=windows GOARCH=amd64 go build -o bin/cc-discord-presence-windows-amd64.exe 
 
 ## Token Pricing
 
-Cost is calculated using current Claude API pricing (Dec 2025):
+Cost from the JSONL fallback is an **estimate**. Known model pricing (per 1M tokens):
 
-| Model | Input (per 1M tokens) | Output (per 1M tokens) |
-|-------|----------------------|------------------------|
+| Model | Input | Output |
+|-------|-------|--------|
+| Opus 5 / 4.6 | $5.00 | $25.00 |
 | Opus 4.5 | $15.00 | $75.00 |
-| Sonnet 4.5 | $3.00 | $15.00 |
-| Sonnet 4 | $3.00 | $15.00 |
-| Haiku 4.5 | $1.00 | $5.00 |
+| Sonnet 5 | $2.00 | $10.00 |
+| Sonnet 4.5 / 4.6 / 4 | $3.00 | $15.00 |
+| Haiku 4.5 / 5 | $1.00 | $5.00 |
+| _unknown_ | $3.00 | $15.00 |
+
+Cache-read tokens are billed at 0.1× the input rate and cache-writes at 1.25×.
+Unknown model IDs fall back to the _unknown_ row. For exact figures, use the
+statusline integration (Claude Code's own cost number).
 
 ## Advanced: Custom Discord App
 

@@ -11,8 +11,8 @@ PID_FILE="$CLAUDE_DIR/discord-presence.pid"
 LOG_FILE="$CLAUDE_DIR/discord-presence.log"
 SESSIONS_DIR="$CLAUDE_DIR/discord-presence-sessions"
 REFCOUNT_FILE="$CLAUDE_DIR/discord-presence.refcount"
-REPO="tsanva/cc-discord-presence"
-VERSION="v1.0.3"
+REPO="Jerit3787/cc-discord-presence"
+VERSION="v1.0.4"
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -29,6 +29,16 @@ process_exists() {
     else
         kill -0 "$pid" 2>/dev/null
     fi
+}
+
+# A tracked session is live only if its PID still belongs to a Claude Code
+# process. Without the command check, PID reuse makes ended sessions look active
+# forever, so the daemon never shuts down and the session count drifts upward.
+session_alive() {
+    local pid=$1
+    process_exists "$pid" || return 1
+    $IS_WINDOWS && return 0
+    ps -p "$pid" -o command= 2>/dev/null | grep -qi "claude"
 }
 
 # Ensure directories exist
@@ -48,7 +58,7 @@ else
     for session_file in "$SESSIONS_DIR"/*; do
         [[ -f "$session_file" ]] || continue
         pid=$(basename "$session_file")
-        if process_exists "$pid"; then
+        if session_alive "$pid"; then
             ACTIVE_SESSIONS=$((ACTIVE_SESSIONS + 1))
         else
             rm -f "$session_file"

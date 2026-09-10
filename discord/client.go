@@ -71,6 +71,16 @@ func (c *Client) Connect() error {
 	return nil
 }
 
+// Reconnect closes any existing connection and establishes a fresh one.
+// Used to recover after Discord is quit and reopened.
+func (c *Client) Reconnect() error {
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+	return c.Connect()
+}
+
 // SetActivity updates the Discord Rich Presence
 func (c *Client) SetActivity(activity Activity) error {
 	if c.conn == nil {
