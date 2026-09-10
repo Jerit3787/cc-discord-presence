@@ -401,6 +401,48 @@ invalid json line
 	}
 }
 
+// TestParseJSONLSessionLargeLine ensures a transcript line larger than any
+// scanner buffer (pasted image, big file dump) does not stop the parse and
+// freeze the token total — messages after it must still be counted.
+func TestParseJSONLSessionLargeLine(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cc-discord-presence-bigline")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	huge := make([]byte, 3<<20) // 3 MiB, well past the old 1 MiB cap
+	for i := range huge {
+		huge[i] = 'x'
+	}
+
+	content := `{"type":"user","cwd":"/Users/test/big"}
+{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"user","note":"` + string(huge) + `"}
+{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":200,"output_tokens":75,"cache_read_input_tokens":1000}}}
+`
+	testFile := filepath.Join(tmpDir, "big.jsonl")
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := parseJSONLSession(testFile, "")
+	if got == nil {
+		t.Fatal("parseJSONLSession() = nil")
+	}
+	// Both assistant messages must be counted (input+output only): 100+50 + 200+75 = 425
+	if got.TotalTokens != 425 {
+		t.Errorf("TotalTokens = %d, want 425 (message after the huge line was dropped)", got.TotalTokens)
+	}
+	// Cache tokens still feed the cost estimate even though they aren't displayed.
+	if got.TotalCost <= 0 {
+		t.Errorf("TotalCost = %v, want > 0 (cache-read tokens should be priced)", got.TotalCost)
+	}
+	if got.ProjectName != "big" {
+		t.Errorf("ProjectName = %q, want %q", got.ProjectName, "big")
+	}
+}
+
 // TestPathDecoding tests the path decoding logic used in findMostRecentJSONL
 func TestPathDecoding(t *testing.T) {
 	// This tests the path decoding algorithm used in findMostRecentJSONL

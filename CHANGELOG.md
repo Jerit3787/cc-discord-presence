@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-09-11
+
+### Fixed
+- **Token / cost total froze and never updated** for sessions whose transcript
+  contained a line larger than 1 MB (pasted images, large file reads or diffs).
+  `bufio.Scanner` aborts the entire scan on the first oversized line, so parsing
+  stopped there permanently. Replaced with a buffered reader that grows to fit
+  each line, so every message is counted regardless of line size.
+- `start.ps1` (Windows) gained the same binary version check as `start.sh`.
+
+### Changed
+- The displayed token count is back to cumulative input + output only. Cache
+  tokens (added to the count in 1.0.4) still feed the cost estimate but ran to
+  billions on long sessions and swamped the headline number.
+
 ## [1.0.4] - 2026-09-10
 
 Reliability fork ([Jerit3787/cc-discord-presence](https://github.com/Jerit3787/cc-discord-presence)).

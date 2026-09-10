@@ -423,33 +423,37 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 		firstTimestamp     string
 	)
 
-	scanner := bufio.NewScanner(file)
-	// Increase buffer size for large lines
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	// A transcript line can be many MB (pasted images, large file reads / diffs).
+	// bufio.Scanner aborts the whole scan on the first line past its buffer cap,
+	// which would freeze the token total at that point forever, so read
+	// line-by-line with a Reader that grows to fit each line instead.
+	reader := bufio.NewReaderSize(file, 256*1024)
+	for {
+		line, readErr := reader.ReadBytes('\n')
 
-	for scanner.Scan() {
-		var msg JSONLMessage
-		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
-			continue
+		if len(line) > 0 {
+			var msg JSONLMessage
+			if json.Unmarshal(line, &msg) == nil {
+				if firstTimestamp == "" && msg.Timestamp != "" {
+					firstTimestamp = msg.Timestamp
+				}
+				// cwd usually appears on the first message
+				if msg.Cwd != "" && projectPath == "" {
+					projectPath = msg.Cwd
+				}
+				// Only assistant messages carry model + usage
+				if msg.Type == "assistant" && msg.Message.Model != "" {
+					lastModel = msg.Message.Model
+					totalInputTokens += msg.Message.Usage.InputTokens
+					totalOutputTokens += msg.Message.Usage.OutputTokens
+					totalCacheRead += msg.Message.Usage.CacheReadTokens
+					totalCacheCreation += msg.Message.Usage.CacheCreationTokens
+				}
+			}
 		}
 
-		if firstTimestamp == "" && msg.Timestamp != "" {
-			firstTimestamp = msg.Timestamp
-		}
-
-		// Extract cwd from any message that has it (usually first message)
-		if msg.Cwd != "" && projectPath == "" {
-			projectPath = msg.Cwd
-		}
-
-		// Only process assistant messages with usage data
-		if msg.Type == "assistant" && msg.Message.Model != "" {
-			lastModel = msg.Message.Model
-			totalInputTokens += msg.Message.Usage.InputTokens
-			totalOutputTokens += msg.Message.Usage.OutputTokens
-			totalCacheRead += msg.Message.Usage.CacheReadTokens
-			totalCacheCreation += msg.Message.Usage.CacheCreationTokens
+		if readErr != nil {
+			break // io.EOF, or an unrecoverable read error
 		}
 	}
 
@@ -459,6 +463,12 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 
 	totalCost := calculateCost(lastModel, totalInputTokens, totalOutputTokens, totalCacheRead, totalCacheCreation)
 	modelName := formatModelName(lastModel)
+
+	// Displayed token count is cumulative input + output, matching the original
+	// behaviour and the statusline data source. Cache tokens are folded into the
+	// cost estimate above but not the headline number (they run to billions on
+	// long sessions and would dwarf everything else).
+	displayTokens := totalInputTokens + totalOutputTokens
 
 	projectName := filepath.Base(projectPath)
 	if projectName == "" || projectName == "." {
@@ -479,7 +489,7 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 		ProjectPath: projectPath,
 		GitBranch:   getGitBranch(projectPath),
 		ModelName:   modelName,
-		TotalTokens: totalInputTokens + totalOutputTokens + totalCacheRead + totalCacheCreation,
+		TotalTokens: displayTokens,
 		TotalCost:   totalCost,
 		StartTime:   startTime,
 	}

@@ -9,8 +9,8 @@ $BinDir = Join-Path $ClaudeDir "bin"
 $PidFile = Join-Path $ClaudeDir "discord-presence.pid"
 $LogFile = Join-Path $ClaudeDir "discord-presence.log"
 $RefcountFile = Join-Path $ClaudeDir "discord-presence.refcount"
-$Repo = "tsanva/cc-discord-presence"
-$Version = "v1.0.3"
+$Repo = "Jerit3787/cc-discord-presence"
+$Version = "v1.0.5"
 
 # Ensure directories exist
 New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
@@ -38,19 +38,34 @@ if (Test-Path $PidFile) {
 
 $BinaryName = "cc-discord-presence-windows-amd64.exe"
 $Binary = Join-Path $BinDir $BinaryName
+$VersionFile = Join-Path $BinDir ".version"
 
-# Download binary if not present
-if (-not (Test-Path $Binary)) {
-    Write-Host "Downloading cc-discord-presence for windows-amd64..."
+# Download the binary if it is missing or from a different version
+$InstalledVersion = ""
+if (Test-Path $VersionFile) {
+    $InstalledVersion = (Get-Content $VersionFile -ErrorAction SilentlyContinue)
+}
+if ((-not (Test-Path $Binary)) -or ($InstalledVersion -ne $Version)) {
+    Write-Host "Downloading cc-discord-presence $Version for windows-amd64..."
 
     $DownloadUrl = "https://github.com/$Repo/releases/download/$Version/$BinaryName"
 
     try {
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $Binary -UseBasicParsing
+        $Version | Out-File -FilePath $VersionFile -Encoding ASCII -NoNewline
         Write-Host "Downloaded successfully!"
     } catch {
         Write-Error "Failed to download binary: $_"
         exit 1
+    }
+
+    # Retire a running daemon so the block below starts the new binary
+    if (Test-Path $PidFile) {
+        $OldDaemon = Get-Content $PidFile -ErrorAction SilentlyContinue
+        if ($OldDaemon) {
+            Stop-Process -Id $OldDaemon -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item $PidFile -ErrorAction SilentlyContinue
     }
 }
 

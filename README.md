@@ -166,8 +166,10 @@ per 1M tokens:
 
 Cache-read tokens are estimated at 0.1× the input rate and cache-writes at 1.25×
 (the 5-minute rate; 1-hour cache writes actually cost 2×, which the transcript
-doesn't distinguish). For exact figures, use the statusline integration — it
-reports Claude Code's own `total_cost_usd`.
+doesn't distinguish). Cache tokens count toward the cost estimate but **not** the
+displayed token number, which stays cumulative input + output. For exact
+figures, use the statusline integration — it reports Claude Code's own
+`total_cost_usd`.
 
 ## Advanced: Custom Discord App
 
