@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated:** December 2025
+**Last updated:** November 2026
 
 ## Overview
 
@@ -28,8 +28,9 @@ The application reads the following local data to display your Discord Rich Pres
 | Model name | Claude Code session files | Display on Discord |
 | Token count | Claude Code session files | Display on Discord |
 | Session cost | Claude Code session files | Display on Discord |
+| Cloud session activity, model, and cost | Claude desktop app local storage | Display on Discord |
 
-This data is read from files in `~/.claude/` on your machine and sent only to your local Discord client via IPC (Inter-Process Communication). It is **not** transmitted over the internet.
+This data is read from files in `~/.claude/` and the Claude desktop app's local storage on your machine, and sent only to your local Discord client via IPC (Inter-Process Communication). It is **not** transmitted over the internet.
 
 ## Discord Integration
 

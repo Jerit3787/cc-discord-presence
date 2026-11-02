@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Claude Code cloud sessions** started from the Claude desktop app are now
+  detected. They previously left no local transcript, so the presence kept
+  showing the last local session. The daemon reads the desktop app's local
+  storage (never the network) for cloud-session activity, model, and cost, and
+  shows "Cloud session" with a `cloud` marker because cloud projects and token
+  counts are not stored on this machine.
+
 ## [1.0.5] - 2026-09-11
 
 ### Fixed

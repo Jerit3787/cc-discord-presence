@@ -115,6 +115,11 @@ type SessionData struct {
 	TotalTokens int64
 	TotalCost   float64
 	StartTime   time.Time
+
+	// IsCloud marks a Claude Code cloud session. Cloud transcripts and token
+	// counts live on Anthropic's infrastructure, so only locally recorded
+	// model and cost are available.
+	IsCloud bool
 }
 
 // JSONLMessage represents a message entry in JSONL files
@@ -208,9 +213,12 @@ func main() {
 	// Try initial read and show data source
 	if session := readSessionData(); session != nil {
 		updatePresence(session)
-		if usingFallback {
+		switch {
+		case session.IsCloud:
+			fmt.Printf("✓ Found active session: %s (using cloud session data)\n", session.ProjectName)
+		case usingFallback:
 			fmt.Printf("✓ Found active session: %s (using JSONL fallback)\n", session.ProjectName)
-		} else {
+		default:
 			fmt.Printf("✓ Found active session: %s (using statusline data)\n", session.ProjectName)
 		}
 	} else {
@@ -551,9 +559,46 @@ func formatModelName(modelID string) string {
 	return "Claude"
 }
 
-// readSessionData tries statusline data first, then falls back to JSONL parsing
+// latestLocalActivity returns the most recent modification time of the local
+// data sources (statusline file or selected transcript). Cloud sessions are
+// only shown when their activity is newer than this, so returning to a local
+// session immediately takes the presence back.
+func latestLocalActivity() time.Time {
+	var latest time.Time
+
+	if info, err := os.Stat(dataFilePath); err == nil {
+		latest = info.ModTime()
+	}
+	// Use the newest transcript across all local sessions, not the sticky
+	// display selection: activity in any local session should beat a cloud one.
+	if files, err := listJSONLSessions(); err == nil && len(files) > 0 && files[0].modTime.After(latest) {
+		latest = files[0].modTime
+	}
+	return latest
+}
+
+// cloudSessionData converts a desktop cloud session into presence data. The
+// cloud project/title is not stored locally, so a generic label is used rather
+// than attributing the session to the wrong project.
+func cloudSessionData(session *cloudSession) *SessionData {
+	return &SessionData{
+		ProjectName: "Cloud session",
+		ModelName:   formatModelName(session.ModelID),
+		TotalCost:   session.CostUSD,
+		StartTime:   markShown("cloud:" + session.ID),
+		IsCloud:     true,
+	}
+}
+
+// readSessionData chooses the most recently active session. Cloud sessions are
+// checked before local sources because a cloud session leaves no transcript
+// locally and would otherwise be masked by the last local session.
 func readSessionData() *SessionData {
-	// First try statusline data (most accurate)
+	if cloud := activeCloudSession(readCloudSessions(), latestLocalActivity(), time.Now()); cloud != nil {
+		return cloudSessionData(cloud)
+	}
+
+	// Then try statusline data (most accurate)
 	if data := readStatusLineData(); data != nil {
 		if usingFallback {
 			usingFallback = false
@@ -589,6 +634,21 @@ func readSessionData() *SessionData {
 	return session
 }
 
+// formatPresenceState builds the model | usage | cost line. Cloud sessions
+// have no local token count, so they show a "cloud" marker instead.
+func formatPresenceState(session *SessionData) string {
+	if session.IsCloud {
+		if session.TotalCost > 0 {
+			return fmt.Sprintf("%s | cloud | $%.4f", session.ModelName, session.TotalCost)
+		}
+		return fmt.Sprintf("%s | cloud", session.ModelName)
+	}
+	return fmt.Sprintf("%s | %s tokens | $%.4f",
+		session.ModelName,
+		formatNumber(session.TotalTokens),
+		session.TotalCost)
+}
+
 func updatePresence(session *SessionData) {
 	// Build details line with prefix
 	details := fmt.Sprintf("Working on: %s", session.ProjectName)
@@ -596,11 +656,7 @@ func updatePresence(session *SessionData) {
 		details = fmt.Sprintf("Working on: %s (%s)", session.ProjectName, session.GitBranch)
 	}
 
-	// Build state line: model | tokens | cost
-	state := fmt.Sprintf("%s | %s tokens | $%.4f",
-		session.ModelName,
-		formatNumber(session.TotalTokens),
-		session.TotalCost)
+	state := formatPresenceState(session)
 
 	activity := discord.Activity{
 		Details:   details,

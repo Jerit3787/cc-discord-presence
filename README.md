@@ -31,6 +31,7 @@ Show your Claude Code session on Discord! Display your current project, git bran
 - **Model Name** - Shows which Claude model you're using (derived from the model ID, e.g. "Sonnet 5")
 - **Total Tokens** - Token usage counter (input + output)
 - **Total Cost** - Real-time cost tracking for your session
+- **Cloud Sessions** - Detects Claude Code cloud sessions from the Claude desktop app
 
 ## Installation
 
@@ -60,7 +61,7 @@ go build -o cc-discord-presence .
 
 ## How It Works
 
-The app reads session data from Claude Code in two ways:
+The app reads session data from Claude Code in three ways:
 
 ### 1. JSONL Fallback (Zero Config)
 
@@ -69,6 +70,21 @@ By default, the app parses Claude Code's session files from `~/.claude/projects/
 ### 2. Statusline Integration (More Accurate)
 
 For the most accurate token/cost data, you can configure the statusline integration. This uses Claude Code's own calculations instead of estimating from JSONL.
+
+### 3. Cloud Sessions (Claude Desktop App)
+
+Cloud sessions run on Anthropic's infrastructure and do not write a transcript to
+`~/.claude/projects/`. When the Claude desktop app is running, the daemon reads
+its local storage (only on this machine — nothing is sent anywhere) to detect a
+recently active cloud session. Cloud sessions show the model and cost, but not
+the project name or token count, because those details stay on the cloud VM.
+
+A cloud session only takes over the presence while it is more recently active
+than your local session; new local activity takes the presence back.
+
+> Cloud detection needs the presence daemon to be running. It normally starts
+> with any local Claude Code session; if you only use cloud sessions, start it
+> manually (`./cc-discord-presence`).
 
 <a name="statusline-setup"></a>
 #### Statusline Setup
@@ -115,6 +131,7 @@ cat ~/.claude/discord-presence.log
 You'll see one of:
 - `✓ Found active session: project-name (using statusline data)` - Best accuracy
 - `✓ Found active session: project-name (using JSONL fallback)` - Working, but consider setting up statusline
+- `✓ Found active session: Cloud session (using cloud session data)` - Claude desktop app cloud session
 
 ## Discord Presence Display
 

@@ -10,12 +10,14 @@
 - **Key Dependencies**:
   - `github.com/fsnotify/fsnotify` - Cross-platform file watching
   - `github.com/Microsoft/go-winio` - Windows named pipe support (Discord IPC)
+  - `github.com/syndtr/goleveldb` - Read-only access to the desktop app's Local Storage for cloud sessions
 
 ## Project Structure
 
 ```
 cc-discord-presence/
 ├── main.go               # Main entry - session tracking, data parsing, presence updates
+├── cloud_session.go      # Desktop-app cloud session detection (local storage reader)
 ├── discord/
 │   ├── client.go         # Discord IPC client, Conn interface, presence logic
 │   ├── conn_unix.go      # Unix socket connection (macOS/Linux)
@@ -42,12 +44,19 @@ cc-discord-presence/
 
 ### Session Data Sources (Priority Order)
 
-1. **Statusline Data** (`~/.claude/discord-presence-data.json`)
+1. **Cloud Sessions** (Claude desktop app Local Storage)
+   - Checked first because cloud sessions leave no local transcript
+   - Reads Chromium's LevelDB at `~/Library/Application Support/Claude/Local Storage/leveldb`
+   - Provides: cloud session activity, model, and cost
+   - Cloud project/token data lives on the VM, so the presence shows "Cloud session"
+   - Only wins while more recently active than the local session
+
+2. **Statusline Data** (`~/.claude/discord-presence-data.json`)
    - Most accurate - uses Claude Code's own calculations
    - Requires user to configure statusline wrapper
    - Provides: model display name, cost, tokens directly from Claude
 
-2. **JSONL Fallback** (`~/.claude/projects/<encoded-path>/*.jsonl`)
+3. **JSONL Fallback** (`~/.claude/projects/<encoded-path>/*.jsonl`)
    - Zero configuration needed
    - Parses session transcript files
    - Calculates cost based on model pricing table
