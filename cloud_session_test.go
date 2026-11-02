@@ -100,6 +100,39 @@ func TestParseCloudSessionsRejectsBadDurability(t *testing.T) {
 	}
 }
 
+func TestParseCloudSessionsSkipsMalformedEntry(t *testing.T) {
+	now := time.Now()
+	store := map[string]string{
+		"epitaxy:code-session-durability:v1": `{
+			"session_01good":{"uuid":"a","at":` + ms(now.UnixMilli()) + `},
+			"session_01bad":{"uuid":"b","at":"not-a-number"}
+		}`,
+	}
+
+	sessions := parseCloudSessions(store)
+	if len(sessions) != 1 {
+		t.Fatalf("parseCloudSessions() returned %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ID != "session_01good" {
+		t.Errorf("session ID = %q, want session_01good", sessions[0].ID)
+	}
+}
+
+func TestParseCloudSessionPillsSkipsMalformedRow(t *testing.T) {
+	store := map[string]string{
+		"epitaxy:code-session-durability:v1": `{"session_01a":{"uuid":"a","at":` + ms(time.Now().UnixMilli()) + `}}`,
+		"code-session-pills":                 `[["session_01a","claude-opus-5-5","high"], 42]`,
+	}
+
+	sessions := parseCloudSessions(store)
+	if len(sessions) != 1 {
+		t.Fatalf("parseCloudSessions() returned %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ModelID != "claude-opus-5-5" {
+		t.Errorf("model = %q, want claude-opus-5-5", sessions[0].ModelID)
+	}
+}
+
 func TestParseCloudSessionsKeepsSessionWithBadExtras(t *testing.T) {
 	now := time.Now()
 	durability := `{"session_01a":{"uuid":"a","at":` + ms(now.UnixMilli()) + `}}`

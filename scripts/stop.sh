@@ -4,6 +4,7 @@
 
 # Configuration
 CLAUDE_DIR="$HOME/.claude"
+BIN_DIR="$CLAUDE_DIR/bin"
 PID_FILE="$CLAUDE_DIR/discord-presence.pid"
 SESSIONS_DIR="$CLAUDE_DIR/discord-presence-sessions"
 REFCOUNT_FILE="$CLAUDE_DIR/discord-presence.refcount"
@@ -32,6 +33,14 @@ kill_process() {
     else
         kill "$pid" 2>/dev/null
     fi
+}
+
+# A PID from the PID file is only ours if its command line is the daemon
+# binary, so a reused PID is not killed.
+daemon_pid_alive() {
+    local pid=$1
+    process_exists "$pid" || return 1
+    ps -p "$pid" -o command= 2>/dev/null | grep -qi "cc-discord-presence"
 }
 
 # A tracked session counts as live only if its PID is still a Claude Code
@@ -77,22 +86,31 @@ else
         echo "Discord Rich Presence still in use by $ACTIVE_SESSIONS session(s)"
         exit 0
     fi
-    rm -rf "$SESSIONS_DIR"
+    # Remove the directory only if it is empty; don't race a concurrent start.
+    rmdir "$SESSIONS_DIR" 2>/dev/null || true
 fi
 
 # Stop the daemon
 if [[ -f "$PID_FILE" ]]; then
     PID=$(cat "$PID_FILE")
-    if process_exists "$PID"; then
+    if daemon_pid_alive "$PID"; then
         kill_process "$PID"
-        echo "Discord Rich Presence stopped (PID: $PID)"
+        for _ in 1 2 3 4 5; do
+            process_exists "$PID" || break
+            sleep 0.2
+        done
+        if process_exists "$PID"; then
+            echo "Warning: daemon $PID did not stop" >&2
+        else
+            echo "Discord Rich Presence stopped (PID: $PID)"
+        fi
     fi
     rm -f "$PID_FILE"
 else
-    # Fallback: kill by process name
+    # Fallback: kill by the daemon binary path, not any command mentioning it.
     if $IS_WINDOWS; then
         taskkill //F //IM "cc-discord-presence-windows-amd64.exe" >/dev/null 2>&1 || true
     else
-        pkill -f cc-discord-presence 2>/dev/null || true
+        pkill -f "$BIN_DIR/cc-discord-presence" 2>/dev/null || true
     fi
 fi

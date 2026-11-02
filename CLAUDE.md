@@ -49,6 +49,7 @@ cc-discord-presence/
 
 1. **Cloud Sessions** (Claude desktop app Local Storage)
    - Checked first because cloud sessions leave no local transcript
+   - Only used while the Claude desktop app process is running
    - Reads Chromium's LevelDB at `~/Library/Application Support/Claude/Local Storage/leveldb`
    - Provides: cloud session activity, model, and cost
    - Cloud project/token data lives on the VM, so the presence shows "Cloud session"
@@ -118,7 +119,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Key points:
 - Shows nudge message when using JSONL fallback
 - Tokens shown are context size (the last request's input, cached tokens included), not a session total
 - Only pushes to Discord when the displayed text changes
-- Clears the presence and exits after 30s with no live local session (PID registry) and no active cloud session; this covers abnormal app closes where `SessionEnd` never runs
+- Plugin-managed daemons clear the presence and exit after 30s with no live local session (PID registry) and no active cloud session; this covers abnormal app closes where `SessionEnd` never runs. Manually started daemons stay until Ctrl+C
 - start.sh/start.ps1 re-download the binary when `<binary>.version` doesn't match `VERSION`, and stop a running daemon from another release first
 
 ## Releasing

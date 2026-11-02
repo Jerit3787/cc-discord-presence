@@ -6,10 +6,12 @@ import type { Engine, Register } from 'claude-code'
 // statusline wrapper remains the fallback for versions without hooks modules.
 const FILE = '.claude/discord-presence-module.json'
 
-// "claude-opus-5-5" -> "Opus 5.5", the form the statusline's display_name has.
+// "claude-opus-5-5" -> "Opus 5.5"; "claude-sonnet-5" -> "Sonnet 5".
 function displayName(id: string) {
-  const m = id.match(/^claude-([a-z]+)-(\d+)-(\d+)/)
-  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}` : id
+  const m = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?/)
+  if (!m) return id
+  const version = m[3] === undefined ? m[2] : `${m[2]}.${m[3]}`
+  return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${version}`
 }
 
 // HOME is usually unset on Windows; the daemon resolves the same folder.
@@ -20,11 +22,10 @@ async function filePath($: Engine) {
 }
 
 async function publish($: Engine) {
-  const [path, id, cwd, root, model, usage, now] = await Promise.all([
+  const [path, id, cwd, model, usage, now] = await Promise.all([
     filePath($),
     $.session.id(),
     $.session.cwd(),
-    $.session.root(),
     $.session.model(),
     $.session.usage(),
     $.clock.now(),
@@ -32,17 +33,19 @@ async function publish($: Engine) {
   if (!path) return
 
   // Same shape as the statusline JSON, so the daemon parses both alike.
+  // cwd is used for project_dir because the mods API does not expose a
+  // separate repository root on every supported Claude Code version.
   const data = {
     session_id: id,
     cwd,
     model: { id: model, display_name: displayName(model) },
-    workspace: { current_dir: cwd, project_dir: root },
+    workspace: { current_dir: cwd, project_dir: cwd },
     cost: {
       total_cost_usd: usage.cost?.usd ?? 0,
-      total_duration_ms: now - usage.startedAt,
+      total_duration_ms: usage.startedAt == null ? 0 : Math.max(0, now - usage.startedAt),
     },
     // Context size: the last request's input, cached tokens included.
-    context_window: { total_input_tokens: usage.context.tokens ?? 0 },
+    context_window: { total_input_tokens: usage.context?.tokens ?? 0 },
   }
   await $.fs.write(path, JSON.stringify(data))
 }
@@ -83,7 +86,9 @@ export const register: Register = on => {
     return result
   })
 
-  on('session.end', async ($, e, next) => {
+  // The mods API exposes the classic SessionEnd event; there is no
+  // session.end event in the current runtime.
+  on('classic.SessionEnd', async ($, e, next) => {
     await clear($).catch(() => {})
     return next(e)
   })

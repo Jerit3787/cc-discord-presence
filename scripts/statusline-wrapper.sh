@@ -24,12 +24,16 @@ fi
 
 # Default status line. Uses jq when available, falls back to a bare string.
 if command -v jq &> /dev/null; then
-    printf '%s' "$json_data" | jq -r '
-        [ (.workspace.current_dir // .cwd // "" | sub("^" + (env.HOME // "~"); "~"))
+    line=$(printf '%s' "$json_data" | jq -r '
+        [ (.workspace.current_dir // .cwd // "")
         , (.model.display_name // .model.id // "")
         , (if (.cost.total_cost_usd // 0) > 0 then "$" + (.cost.total_cost_usd * 10000 | round / 10000 | tostring) else empty end)
         ] | map(select(. != "" and . != null)) | join("  |  ")
-    ' 2>/dev/null && exit 0
+    ' 2>/dev/null) || line=""
+    if [[ -n "$line" ]]; then
+        printf '%s\n' "$line"
+        exit 0
+    fi
 fi
 
-printf 'Claude Code'
+printf 'Claude Code\n'

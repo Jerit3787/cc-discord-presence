@@ -1,21 +1,22 @@
 {
   "name": "cc-discord-presence",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Discord Rich Presence for Claude Code - Show your session on Discord",
   "author": {
     "name": "tsanva",
     "url": "https://github.com/tsanva"
   },
-  "repository": "https://github.com/tsanva/cc-discord-presence",
+  "repository": "https://github.com/Jerit3787/cc-discord-presence",
   "license": "MIT",
   "keywords": ["discord", "rich-presence", "rpc", "status"],
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume|clear|fork",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/start.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/start.sh\"",
             "timeout": 10
           }
         ]
@@ -26,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/stop.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/stop.sh\"",
             "timeout": 5
           }
         ]

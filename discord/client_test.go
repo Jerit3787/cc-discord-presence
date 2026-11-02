@@ -38,6 +38,9 @@ func (m *mockConn) Close() error {
 	return nil
 }
 
+func (m *mockConn) SetReadDeadline(time.Time) error  { return nil }
+func (m *mockConn) SetWriteDeadline(time.Time) error { return nil }
+
 // writeFrame writes a Discord IPC frame to the mock connection's read buffer
 func (m *mockConn) writeFrame(opcode int32, payload []byte) {
 	binary.Write(&m.readBuffer, binary.LittleEndian, opcode)
@@ -97,14 +100,14 @@ func TestClient_SetActivity_NotConnected(t *testing.T) {
 
 func TestClient_SetActivity(t *testing.T) {
 	tests := []struct {
-		name             string
-		activity         Activity
-		wantDetails      bool
-		wantState        bool
-		wantTimestamps   bool
-		wantAssets       bool
-		wantLargeImage   bool
-		wantLargeText    bool
+		name           string
+		activity       Activity
+		wantDetails    bool
+		wantState      bool
+		wantTimestamps bool
+		wantAssets     bool
+		wantLargeImage bool
+		wantLargeText  bool
 	}{
 		{
 			name:        "Minimal activity - only details",

@@ -10,7 +10,7 @@ $PidFile = Join-Path $ClaudeDir "discord-presence.pid"
 $LogFile = Join-Path $ClaudeDir "discord-presence.log"
 $RefcountFile = Join-Path $ClaudeDir "discord-presence.refcount"
 $Repo = "Jerit3787/cc-discord-presence"
-$Version = "v1.0.8"
+$Version = "v1.0.9"
 
 # Ensure directories exist
 New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
@@ -27,7 +27,7 @@ $ActiveSessions | Out-File -FilePath $RefcountFile -Encoding ASCII -NoNewline
 $BinaryName = "cc-discord-presence-windows-amd64.exe"
 $Binary = Join-Path $BinDir $BinaryName
 $VersionFile = "$Binary.version"
-$InstalledVersion = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { "" }
+$InstalledVersion = if (Test-Path $VersionFile) { ([string](Get-Content $VersionFile -Raw)).Trim() } else { "" }
 
 # If the daemon is already running, just exit, unless it runs a binary from
 # another release: then stop it so the current one is downloaded and started.
@@ -87,7 +87,9 @@ if (-not (Test-Path $Binary)) {
     exit 1
 }
 
-# Start the daemon in background
+# Start the daemon in background. CCDP_MANAGED lets it clear the presence and
+# exit after the last session ends; manually started daemons stay running.
+$env:CCDP_MANAGED = "1"
 $Process = Start-Process -FilePath $Binary -NoNewWindow -PassThru -RedirectStandardOutput $LogFile -RedirectStandardError "$LogFile.err"
 $Process.Id | Out-File -FilePath $PidFile -Encoding ASCII
 

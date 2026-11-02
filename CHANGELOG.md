@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-11-02
+
+### Fixed
+- **Hooks module failed validation and did not load.** It registered the
+  non-existent `session.end` event; use `classic.SessionEnd`. It also called
+  `$.session.root()`, which is not available on every supported Claude Code
+  version; it now uses `cwd` for the project path. Model display names handle
+  major-only IDs, and missing usage fields no longer produce invalid JSON.
+- **Discord IPC could desynchronize or crash on malformed input.** Frames are
+  read with `io.ReadFull`, writes handle short writes, incoming frames are
+  capped at 1 MiB, and the handshake must be a real READY dispatch (CLOSE
+  responses become errors). Connection state is mutex-protected and handshake/
+  activity I/O has a 5-second deadline.
+- **Presence could stay blank after Discord restarted** while the activity text
+  was unchanged. It is now re-sent every 30 seconds as a heartbeat, which also
+  triggers reconnect.
+- **Cloud sessions could keep a stale presence after the desktop app closed.**
+  Cloud data is only used while the Claude desktop app process is running, the
+  Local Storage snapshot is cached, and a failed read is treated as unknown
+  rather than "no session".
+- **One malformed cloud record could hide every cloud session.** Durability and
+  pill records are decoded independently.
+- **A stale hooks-module file could mask a newer statusline session.** The
+  newer of the two files now wins, and the module is still preferred on ties.
+- **SessionStart ran for compaction events**, inflating the Windows refcount;
+  the hook now only runs for startup/resume/clear/fork.
+- **Manually started daemons could exit while a local session was live.**
+  Automatic idle exit is now limited to plugin-managed daemons.
+- **PID files and the sessions directory were handled unsafely.** The daemon
+  removes its own PID file on idle exit; start/stop verify the PID belongs to
+  the daemon before trusting or killing it; stop no longer deletes a directory
+  that a concurrent start may have just populated.
+- **Model IDs with a context qualifier** such as `claude-opus-4-8[1m]` now use
+  the correct pricing, and `999999` formats as `1.0M` instead of `1000.0K`.
+- Statusline wrapper no longer prints a blank line when jq returns an empty
+  result.
+
 ## [1.0.8] - 2026-11-02
 
 ### Fixed

@@ -95,6 +95,8 @@ Cloud sessions run on Anthropic's infrastructure and do not write a transcript t
 its local storage (only on this machine — nothing is sent anywhere) to detect a
 recently active cloud session. Cloud sessions show the model and cost, but not
 the project name or token count, because those details stay on the cloud VM.
+Cloud data is ignored once the desktop app is closed, so its presence does not
+linger.
 
 A cloud session only takes over the presence while it is more recently active
 than your local session; new local activity takes the presence back.
@@ -103,9 +105,10 @@ than your local session; new local activity takes the presence back.
 > with any local Claude Code session; if you only use cloud sessions, start it
 > manually (`./cc-discord-presence`).
 
-The daemon clears the Discord presence and exits after 30 seconds without a live
-local Claude Code session or an active cloud session, so an abnormal app close
-does not leave stale presence behind.
+A daemon started by the plugin clears the Discord presence and exits after 30
+seconds without a live local Claude Code session or an active cloud session, so
+an abnormal app close does not leave stale presence behind. A manually started
+daemon (`./cc-discord-presence`) stays running until you stop it with Ctrl+C.
 
 <a name="statusline-setup"></a>
 #### Statusline Setup (Optional)

@@ -55,6 +55,12 @@ func TestCalculateCost(t *testing.T) {
 			wantCost:     1.5 + 0.75, // $3/M * 0.5 input + $15/M * 0.05 output
 		},
 		{
+			name:        "Qualified 1M-context model ID",
+			modelID:     "claude-opus-4-8[1m]",
+			inputTokens: 1_000_000,
+			wantCost:    5.0,
+		},
+		{
 			name:         "Haiku 4.5 - basic usage",
 			modelID:      "claude-haiku-4-5-20241022",
 			inputTokens:  2_000_000,
@@ -128,6 +134,11 @@ func TestFormatModelName(t *testing.T) {
 			want:    "Opus 5",
 		},
 		{
+			name:    "Qualified 1M-context model ID",
+			modelID: "claude-opus-4-8[1m]",
+			want:    "Opus 4.8",
+		},
+		{
 			name:    "Newer model - unversioned ID",
 			modelID: "claude-sonnet-5",
 			want:    "Sonnet 5",
@@ -176,7 +187,8 @@ func TestFormatNumber(t *testing.T) {
 		{name: "1000 - K suffix", n: 1000, want: "1.0K"},
 		{name: "1500 - K suffix", n: 1500, want: "1.5K"},
 		{name: "10000 - K suffix", n: 10000, want: "10.0K"},
-		{name: "999999 - K suffix", n: 999999, want: "1000.0K"},
+		{name: "999949 - K suffix", n: 999949, want: "999.9K"},
+		{name: "999999 - rounds to M", n: 999999, want: "1.0M"},
 		{name: "1000000 - M suffix", n: 1_000_000, want: "1.0M"},
 		{name: "1500000 - M suffix", n: 1_500_000, want: "1.5M"},
 		{name: "10000000 - M suffix", n: 10_000_000, want: "10.0M"},
@@ -262,6 +274,20 @@ func TestReadStatusLineData(t *testing.T) {
 			wantNil:     false,
 			wantProject: "fallback-project",
 			wantModel:   "Sonnet 4",
+		},
+		{
+			name: "Missing display_name derives a readable name",
+			fileContent: `{
+				"session_id": "abc123",
+				"cwd": "/Users/test/derived-project",
+				"model": {"id": "claude-opus-5"},
+				"workspace": {},
+				"cost": {},
+				"context_window": {}
+			}`,
+			wantNil:     false,
+			wantProject: "derived-project",
+			wantModel:   "Opus 5",
 		},
 	}
 
@@ -709,7 +735,7 @@ func TestReadSessionDataPriority(t *testing.T) {
 		currentSource, nudgeShown = origSource, origNudge
 		cloudSessionsSource = origClouds
 	}()
-	cloudSessionsSource = func() []cloudSession { return nil }
+	cloudSessionsSource = func() ([]cloudSession, error) { return nil, nil }
 
 	tmpDir := t.TempDir()
 	dataFilePath = filepath.Join(tmpDir, "discord-presence-data.json")
@@ -747,11 +773,12 @@ func TestReadSessionDataPriority(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			os.Remove(moduleFilePath)
 			os.Remove(dataFilePath)
-			if tt.module != "" {
-				write(moduleFilePath, tt.module)
-			}
+			// Write statusline first so the module file is the newer one.
 			if tt.statusLine != "" {
 				write(dataFilePath, tt.statusLine)
+			}
+			if tt.module != "" {
+				write(moduleFilePath, tt.module)
 			}
 			currentSource = ""
 
@@ -779,6 +806,70 @@ func TestReadSessionDataPriority(t *testing.T) {
 }
 
 // TestPresenceText tests the activity lines Discord shows.
+func TestReadSessionDataPrefersNewerStatusline(t *testing.T) {
+	origData, origModule, origProjects := dataFilePath, moduleFilePath, projectsDir
+	origSource, origNudge := currentSource, nudgeShown
+	origClouds := cloudSessionsSource
+	origDesktop := desktopAppRunningFn
+	origShownKey, origShownSince := shownKey, shownSince
+	defer func() {
+		dataFilePath, moduleFilePath, projectsDir = origData, origModule, origProjects
+		currentSource, nudgeShown = origSource, origNudge
+		cloudSessionsSource = origClouds
+		desktopAppRunningFn = origDesktop
+		shownKey, shownSince = origShownKey, origShownSince
+	}()
+	cloudSessionsSource = func() ([]cloudSession, error) { return nil, nil }
+	desktopAppRunningFn = func() bool { return false }
+	nudgeShown = true
+
+	tmpDir := t.TempDir()
+	dataFilePath = filepath.Join(tmpDir, "discord-presence-data.json")
+	moduleFilePath = filepath.Join(tmpDir, "discord-presence-module.json")
+	projectsDir = filepath.Join(tmpDir, "projects")
+
+	write := func(path, project string) {
+		content := `{"session_id":"s-` + project + `","cwd":"/work/` + project + `",` +
+			`"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},` +
+			`"workspace":{"project_dir":"/work/` + project + `"}}`
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(moduleFilePath, "stale-module")
+	write(dataFilePath, "fresh-statusline")
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(moduleFilePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readSessionData()
+	if got == nil || got.ProjectName != "fresh-statusline" {
+		t.Fatalf("readSessionData() = %+v, want fresh-statusline", got)
+	}
+	if currentSource != sourceStatusLine {
+		t.Errorf("currentSource = %q, want %q", currentSource, sourceStatusLine)
+	}
+}
+
+func TestShouldSendPresence(t *testing.T) {
+	now := time.Now()
+
+	if !shouldSendPresence("new", "old", now.Add(-time.Second), now) {
+		t.Error("changed presence should be sent")
+	}
+	if shouldSendPresence("same", "same", now.Add(-time.Second), now) {
+		t.Error("unchanged presence was sent before the heartbeat interval")
+	}
+	if !shouldSendPresence("same", "same", now.Add(-PresenceHeartbeatInterval), now) {
+		t.Error("unchanged presence should be re-sent at the heartbeat interval")
+	}
+	if !shouldSendPresence("same", "same", time.Time{}, now) {
+		t.Error("presence should be sent when no previous send time is recorded")
+	}
+}
+
 func TestPresenceText(t *testing.T) {
 	details, state := presenceText(&SessionData{
 		ProjectName: "kadens",

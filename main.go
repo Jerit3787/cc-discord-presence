@@ -35,6 +35,10 @@ const (
 	// ReconnectInterval is how long to wait between attempts to (re)connect to
 	// Discord when it is not reachable.
 	ReconnectInterval = 15 * time.Second
+
+	// PresenceHeartbeatInterval re-sends an unchanged activity periodically so
+	// a Discord restart cannot leave the presence blank until the text changes.
+	PresenceHeartbeatInterval = 30 * time.Second
 )
 
 // modelPricing is first-party Claude API list pricing in USD per million tokens
@@ -71,6 +75,9 @@ var modelDisplayNames = map[string]string{
 	"claude-sonnet-4": "Sonnet 4",
 }
 
+// modelIDQualifierPattern matches a trailing context qualifier, e.g. "[1m]".
+var modelIDQualifierPattern = regexp.MustCompile(`\[[^\]]*\]$`)
+
 // modelIDDatePattern matches a trailing 8-digit snapshot date, e.g. "-20241022".
 var modelIDDatePattern = regexp.MustCompile(`-\d{8}$`)
 
@@ -78,8 +85,10 @@ var modelIDDatePattern = regexp.MustCompile(`-\d{8}$`)
 // e.g. "claude-sonnet-4-5-20241022" -> sonnet, 4, 5.
 var modelTierPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?`)
 
-// normalizeModelID strips a trailing -YYYYMMDD snapshot date.
+// normalizeModelID strips a trailing context qualifier and -YYYYMMDD snapshot
+// date, e.g. "claude-opus-4-8[1m]" -> "claude-opus-4-8".
 func normalizeModelID(modelID string) string {
+	modelID = modelIDQualifierPattern.ReplaceAllString(modelID, "")
 	return modelIDDatePattern.ReplaceAllString(modelID, "")
 }
 
@@ -149,10 +158,11 @@ var (
 	currentSource    string
 	nudgeShown       bool
 	lastPresence     string
+	lastPresenceAt   time.Time
 
 	// cloudSessionsSource is a variable so tests can make cloud detection
-	// deterministic.
-	cloudSessionsSource = readCloudSessions
+	// deterministic. The cached reader is used in production.
+	cloudSessionsSource = readCloudSessionsCached
 
 	// shownKey identifies the session currently on the presence ("sl:<id>" for
 	// statusline data, "module:<id>" for the hooks module, "jl:<path>" for a
@@ -199,30 +209,33 @@ func main() {
 ║     Show your Claude Code session on Discord!             ║
 ╚═══════════════════════════════════════════════════════════╝`)
 
-	// Setup graceful shutdown
+	discordClient = discord.NewClient(ClientID)
+
+	// Setup graceful shutdown. The client is created first so the signal
+	// handler never races with assigning it.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sigChan
 		fmt.Println("\n⏹ Shutting down...")
-		if discordClient != nil {
-			discordClient.Close()
-		}
+		discordClient.Close()
 		os.Exit(0)
 	}()
 
 	// Connect to Discord, retrying until it is reachable. Claude Code is often
 	// launched before Discord; exiting here would leave the presence dead for
-	// the rest of the session.
+	// the rest of the session. Keep checking session liveness while waiting so
+	// a daemon started with no session does not linger forever.
 	fmt.Println("🔗 Connecting to Discord...")
-	discordClient = discord.NewClient(ClientID)
+	var noSessionsSince time.Time
 	for attempt := 1; ; attempt++ {
 		if err := discordClient.Connect(); err == nil {
 			break
 		} else if attempt == 1 {
 			fmt.Fprintf(os.Stderr, "⏳ Discord not reachable (%v); retrying every %s...\n", err, ReconnectInterval)
 		}
+		shutdownIfIdle(&noSessionsSince)
 		time.Sleep(ReconnectInterval)
 	}
 	fmt.Println("✓ Discord RPC connected!")
@@ -239,6 +252,21 @@ func main() {
 
 	// Start watching for changes
 	watchForChanges()
+}
+
+// fileNewer reports whether path a exists and is newer than path b (or b is
+// missing). It is used to avoid preferring a stale hooks-module file over a
+// newer statusline file after an abnormal session exit.
+func fileNewer(a, b string) bool {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		return true
+	}
+	return aInfo.ModTime().After(bInfo.ModTime())
 }
 
 func readStatusLineData() *SessionData {
@@ -277,7 +305,7 @@ func readPresenceFile(path, keyPrefix string) *SessionData {
 	}
 
 	modelName := statusLine.Model.DisplayName
-	if modelName == "" {
+	if modelName == "" || modelName == statusLine.Model.ID {
 		modelName = formatModelName(statusLine.Model.ID)
 	}
 
@@ -637,22 +665,37 @@ func cloudSessionData(session *cloudSession) *SessionData {
 func readSessionData() *SessionData {
 	// Cloud sessions first: they leave no local transcript, so a stale local
 	// session would otherwise mask them. The cloud check itself requires the
-	// cloud activity to be newer than any local activity.
-	if cloud := activeCloudSession(cloudSessionsSource(), latestLocalActivity(), time.Now()); cloud != nil {
-		setSource(sourceCloud)
-		return cloudSessionData(cloud)
+	// desktop app to be running and the cloud activity to be newer than any
+	// local activity.
+	if desktopAppRunningFn() {
+		if sessions, err := cloudSessionsSource(); err == nil {
+			if cloud := activeCloudSession(sessions, relevantLocalActivity(), time.Now()); cloud != nil {
+				setSource(sourceCloud)
+				return cloudSessionData(cloud)
+			}
+		}
 	}
 
-	// The hooks module first among local sources: it runs in every host that
-	// loads it, the desktop app included. Then the statusline wrapper, for
-	// Claude Code versions without hooks modules. Then JSONL as a last resort.
-	if data := readModuleData(); data != nil {
-		setSource(sourceModule)
-		return data
+	// The hooks module is the primary local source, but only while its file is
+	// at least as new as the statusline file. A module file left behind by a
+	// crash must not mask a newer statusline session. Then JSONL as a last
+	// resort.
+	moduleFresh := fileNewer(moduleFilePath, dataFilePath)
+	if moduleFresh {
+		if data := readModuleData(); data != nil {
+			setSource(sourceModule)
+			return data
+		}
 	}
 	if data := readStatusLineData(); data != nil {
 		setSource(sourceStatusLine)
 		return data
+	}
+	if !moduleFresh {
+		if data := readModuleData(); data != nil {
+			setSource(sourceModule)
+			return data
+		}
 	}
 
 	// Fall back to JSONL parsing, with sticky session selection.
@@ -716,14 +759,22 @@ func presenceText(session *SessionData) (details, state string) {
 	return details, state
 }
 
+// shouldSendPresence reports whether the presence should be pushed. Unchanged
+// text is sent again periodically as a heartbeat so a Discord restart is
+// detected and the presence is restored.
+func shouldSendPresence(key, lastKey string, lastSentAt, now time.Time) bool {
+	return key != lastKey || lastSentAt.IsZero() || now.Sub(lastSentAt) >= PresenceHeartbeatInterval
+}
+
 func updatePresence(session *SessionData) {
 	details, state := presenceText(session)
 
 	// The data files change often (the hooks module writes after every tool
 	// call) and the poll runs every few seconds; only send what Discord
-	// would show differently.
+	// would show differently, with a periodic heartbeat.
 	key := details + "\n" + state + "\n" + session.StartTime.String()
-	if key == lastPresence {
+	now := time.Now()
+	if !shouldSendPresence(key, lastPresence, lastPresenceAt, now) {
 		return
 	}
 
@@ -750,10 +801,11 @@ func updatePresence(session *SessionData) {
 		}
 	}
 	lastPresence = key
+	lastPresenceAt = now
 }
 
 func formatNumber(n int64) string {
-	if n >= 1_000_000 {
+	if n >= 999_950 {
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	} else if n >= 1_000 {
 		return fmt.Sprintf("%.1fK", float64(n)/1_000)

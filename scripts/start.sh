@@ -12,7 +12,7 @@ LOG_FILE="$CLAUDE_DIR/discord-presence.log"
 SESSIONS_DIR="$CLAUDE_DIR/discord-presence-sessions"
 REFCOUNT_FILE="$CLAUDE_DIR/discord-presence.refcount"
 REPO="Jerit3787/cc-discord-presence"
-VERSION="v1.0.8"
+VERSION="v1.0.9"
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -39,6 +39,14 @@ session_alive() {
     process_exists "$pid" || return 1
     $IS_WINDOWS && return 0
     ps -p "$pid" -o command= 2>/dev/null | grep -qi "claude"
+}
+
+# A PID from the PID file is only the daemon if its command line is the daemon
+# binary, so a PID reused after a crash is not treated as already running.
+daemon_pid_alive() {
+    local pid=$1
+    process_exists "$pid" || return 1
+    ps -p "$pid" -o command= 2>/dev/null | grep -qi "cc-discord-presence"
 }
 
 # Ensure directories exist
@@ -85,7 +93,7 @@ VERSION_FILE="$BINARY.version"
 # (claude plugin update replaces this script, never the binary.)
 if [[ -f "$PID_FILE" ]]; then
     OLD_PID=$(cat "$PID_FILE")
-    if process_exists "$OLD_PID"; then
+    if daemon_pid_alive "$OLD_PID"; then
         if [[ "$(cat "$VERSION_FILE" 2>/dev/null)" == "$VERSION" ]]; then
             echo "Discord Rich Presence already running (PID: $OLD_PID, sessions: $ACTIVE_SESSIONS)"
             exit 0
@@ -97,6 +105,8 @@ if [[ -f "$PID_FILE" ]]; then
             kill "$OLD_PID" 2>/dev/null || true
         fi
         sleep 1
+    else
+        rm -f "$PID_FILE"
     fi
 fi
 
@@ -136,7 +146,7 @@ if [[ ! -f "$BINARY" || "$(cat "$VERSION_FILE" 2>/dev/null)" != "$VERSION" ]]; t
     # starts the new one.
     if [[ -f "$PID_FILE" ]]; then
         OLD_DAEMON=$(cat "$PID_FILE")
-        if process_exists "$OLD_DAEMON"; then
+        if daemon_pid_alive "$OLD_DAEMON"; then
             if $IS_WINDOWS; then
                 taskkill //F //PID "$OLD_DAEMON" >/dev/null 2>&1 || true
             else
@@ -159,9 +169,9 @@ if $IS_WINDOWS; then
     WIN_PID_FILE=$(cygpath -w "$PID_FILE" 2>/dev/null || echo "$PID_FILE")
 
     # Use PowerShell to start the process and capture PID (hidden window)
-    powershell.exe -NoProfile -WindowStyle Hidden -Command '$process = Start-Process -FilePath "'"$WIN_BINARY"'" -WindowStyle Hidden -PassThru; $process.Id | Out-File -FilePath "'"$WIN_PID_FILE"'" -Encoding ASCII -NoNewline' 2>/dev/null
+    powershell.exe -NoProfile -WindowStyle Hidden -Command '$env:CCDP_MANAGED="1"; $process = Start-Process -FilePath "'"$WIN_BINARY"'" -WindowStyle Hidden -PassThru; $process.Id | Out-File -FilePath "'"$WIN_PID_FILE"'" -Encoding ASCII -NoNewline' 2>/dev/null
 else
-    nohup "$BINARY" > "$LOG_FILE" 2>&1 &
+    CCDP_MANAGED=1 nohup "$BINARY" > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
 fi
 

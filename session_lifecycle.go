@@ -83,11 +83,49 @@ func anySessionAlive() bool {
 	)
 }
 
-// cloudSessionIsActive reports whether a cloud session is active. Cloud
-// sessions have no local process, so they must keep the daemon alive
-// separately.
-func cloudSessionIsActive() bool {
-	return activeCloudSession(cloudSessionsSource(), latestLocalActivity(), time.Now()) != nil
+// desktopAppRunningFn is a variable so tests can control the app check.
+var desktopAppRunningFn = desktopAppRunning
+
+// desktopAppRunning reports whether the Claude desktop app process is running.
+// Cloud session data is only meaningful while the app is open; otherwise the
+// last cloud record could keep a stale presence alive for hours.
+func desktopAppRunning() bool {
+	switch runtime.GOOS {
+	case "darwin":
+		out, err := exec.Command("pgrep", "-x", "Claude").Output()
+		return err == nil && strings.TrimSpace(string(out)) != ""
+	case "windows":
+		out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq Claude.exe", "/NH").Output()
+		return err == nil && strings.Contains(strings.ToLower(string(out)), "claude.exe")
+	default:
+		out, err := exec.Command("pgrep", "-x", "claude").Output()
+		return err == nil && strings.TrimSpace(string(out)) != ""
+	}
+}
+
+// relevantLocalActivity returns the local activity that should suppress a
+// cloud session. In a managed daemon, a file left by a dead session must not
+// hide a live cloud session; only local activity from a registered live
+// session counts. Manual daemons have no registry, so they use file times.
+func relevantLocalActivity() time.Time {
+	if anySessionAlive() || !idleExitEnabled() {
+		return latestLocalActivity()
+	}
+	return time.Time{}
+}
+
+// cloudSessionState reports whether a cloud session is active and whether that
+// answer is known. A database read error is "unknown", which keeps the daemon
+// alive rather than falsely concluding that no session exists.
+func cloudSessionState() (active, known bool) {
+	if !desktopAppRunningFn() {
+		return false, true
+	}
+	sessions, err := cloudSessionsSource()
+	if err != nil {
+		return false, false
+	}
+	return activeCloudSession(sessions, relevantLocalActivity(), time.Now()) != nil, true
 }
 
 // sessionExitDue reports whether the no-session period has lasted long enough.
@@ -98,7 +136,8 @@ func sessionExitDue(noSessionsSince, now time.Time, grace time.Duration) bool {
 // checkSessionLiveness updates the no-session timer and reports whether the
 // daemon should clear the presence and exit.
 func checkSessionLiveness(noSessionsSince *time.Time, now time.Time) bool {
-	if anySessionAlive() || cloudSessionIsActive() {
+	cloudActive, cloudKnown := cloudSessionState()
+	if anySessionAlive() || cloudActive || !cloudKnown {
 		*noSessionsSince = time.Time{}
 		return false
 	}
@@ -109,12 +148,35 @@ func checkSessionLiveness(noSessionsSince *time.Time, now time.Time) bool {
 	return sessionExitDue(*noSessionsSince, now, SessionExitGracePeriod)
 }
 
+// idleExitEnabled reports whether this daemon was started by the plugin. A
+// manually started daemon (./cc-discord-presence) is left running until the
+// user stops it, because it has no session registry to consult.
+func idleExitEnabled() bool {
+	return os.Getenv("CCDP_MANAGED") == "1"
+}
+
+// removePIDFileIfOurs removes the daemon PID file only when it names this
+// process, so an idle exit does not leave a stale PID behind.
+func removePIDFileIfOurs() {
+	path := filepath.Join(claudeDir, "discord-presence.pid")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid != os.Getpid() {
+		return
+	}
+	_ = os.Remove(path)
+}
+
 // shutdownIfIdle exits when no local or cloud session has been alive for the
 // grace period. Closing the Discord connection removes the presence.
 func shutdownIfIdle(noSessionsSince *time.Time) {
-	if !checkSessionLiveness(noSessionsSince, time.Now()) {
+	if !idleExitEnabled() || !checkSessionLiveness(noSessionsSince, time.Now()) {
 		return
 	}
+	removePIDFileIfOurs()
 	fmt.Println("⏹ No active Claude Code session; shutting down...")
 	discordClient.Close()
 	os.Exit(0)

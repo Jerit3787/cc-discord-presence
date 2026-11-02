@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -73,19 +74,62 @@ func desktopLocalStorageDirs() []string {
 }
 
 // readCloudSessions reads cloud sessions from the desktop app's Local Storage.
-// It returns nil when the desktop app is not installed, its database is
-// unavailable, or no cloud session has ever been recorded.
-func readCloudSessions() []cloudSession {
+// It returns (nil, nil) when the desktop app is not installed or no cloud
+// session exists, and an error when an existing database cannot be read, so
+// callers can distinguish "no cloud session" from "unknown".
+func readCloudSessions() ([]cloudSession, error) {
+	var lastErr error
+	hadDatabase := false
+
 	for _, dir := range desktopLocalStorageDirs() {
+		if _, err := os.Stat(dir); err != nil {
+			if !os.IsNotExist(err) {
+				lastErr = err
+			}
+			continue
+		}
+		hadDatabase = true
+
 		store, err := readLocalStorage(dir)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		if sessions := parseCloudSessions(store); len(sessions) > 0 {
-			return sessions
+			return sessions, nil
 		}
 	}
-	return nil
+
+	if hadDatabase && lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, nil
+}
+
+// cloudStoreCache avoids re-opening (and, on Windows, re-copying) the desktop
+// app's Local Storage twice per poll and on every watcher event.
+const cloudStoreCacheTTL = 5 * time.Second
+
+var (
+	cloudStoreMu       sync.Mutex
+	cloudStoreAt       time.Time
+	cloudStoreSessions []cloudSession
+	cloudStoreErr      error
+)
+
+func readCloudSessionsCached() ([]cloudSession, error) {
+	cloudStoreMu.Lock()
+	defer cloudStoreMu.Unlock()
+
+	if time.Since(cloudStoreAt) < cloudStoreCacheTTL {
+		return cloudStoreSessions, cloudStoreErr
+	}
+
+	sessions, err := readCloudSessions()
+	cloudStoreSessions = sessions
+	cloudStoreErr = err
+	cloudStoreAt = time.Now()
+	return sessions, err
 }
 
 // readLocalStorage reads a Chromium Local Storage LevelDB. It first tries to
@@ -177,7 +221,7 @@ func decodeLocalStorageValue(raw []byte) string {
 // Malformed optional values are ignored; a malformed durability record means
 // there is nothing reliable to report.
 func parseCloudSessions(store map[string]string) []cloudSession {
-	var durability map[string]cloudDurabilityEntry
+	var durability map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(store[cloudDurabilityKey]), &durability); err != nil {
 		return nil
 	}
@@ -185,7 +229,11 @@ func parseCloudSessions(store map[string]string) []cloudSession {
 	models := parseCloudSessionPills(store[cloudPillsKey])
 
 	sessions := make([]cloudSession, 0, len(durability))
-	for id, entry := range durability {
+	for id, raw := range durability {
+		var entry cloudDurabilityEntry
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			continue
+		}
 		if !strings.HasPrefix(id, cloudSessionPrefix) || entry.At <= 0 {
 			continue
 		}
@@ -217,13 +265,17 @@ func parseCloudSessions(store map[string]string) []cloudSession {
 
 // parseCloudSessionPills decodes the desktop app's [id, model, effort] rows.
 func parseCloudSessionPills(raw string) map[string]string {
-	var pills [][]string
-	if err := json.Unmarshal([]byte(raw), &pills); err != nil {
+	var rows []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
 		return nil
 	}
 
-	models := make(map[string]string, len(pills))
-	for _, pill := range pills {
+	models := make(map[string]string, len(rows))
+	for _, row := range rows {
+		var pill []string
+		if err := json.Unmarshal(row, &pill); err != nil {
+			continue
+		}
 		if len(pill) >= 2 && pill[0] != "" && pill[1] != "" {
 			models[pill[0]] = pill[1]
 		}
