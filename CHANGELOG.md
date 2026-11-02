@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-11-02
+
 ### Added
 - **Claude Code cloud sessions** started from the Claude desktop app are now
   detected. They previously left no local transcript, so the presence kept
