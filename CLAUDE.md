@@ -28,6 +28,9 @@ cc-discord-presence/
 │   ├── stop.sh           # Plugin hook: stops daemon on SessionEnd
 │   ├── statusline-wrapper.sh  # Wrapper script (copied to ~/.claude/)
 │   └── setup-statusline.sh    # One-time setup for statusline integration
+├── hooks/
+│   ├── hooks.json        # Registers the hooks module (empty "hooks" keeps older versions loading)
+│   └── register.ts       # Hooks module: writes discord-presence-module.json
 ├── .claude-plugin/
 │   └── plugin.json       # Plugin manifest with SessionStart/SessionEnd hooks
 ├── go.mod
@@ -51,16 +54,21 @@ cc-discord-presence/
    - Cloud project/token data lives on the VM, so the presence shows "Cloud session"
    - Only wins while more recently active than the local session
 
-2. **Statusline Data** (`~/.claude/discord-presence-data.json`)
-   - Most accurate - uses Claude Code's own calculations
-   - Requires user to configure statusline wrapper
-   - Provides: model display name, cost, tokens directly from Claude
+2. **Hooks Module** (`~/.claude/discord-presence-module.json`)
+   - Most accurate local source - Claude Code's own figures via the hooks module API
+   - Zero configuration; runs in every host that loads hooks modules (terminal, desktop app, IDEs)
+   - Same JSON shape as the statusline data; blanked to `{}` on session end
 
-3. **JSONL Fallback** (`~/.claude/projects/<encoded-path>/*.jsonl`)
+3. **Statusline Data** (`~/.claude/discord-presence-data.json`)
+   - Same accuracy, for Claude Code versions without hooks modules
+   - Requires user to configure statusline wrapper
+
+4. **JSONL Fallback** (`~/.claude/projects/<encoded-path>/*.jsonl`)
    - Zero configuration needed
    - Parses session transcript files
    - Calculates cost based on model pricing table
    - Finds most recently modified file (handles multiple instances)
+   - Uses sticky selection so concurrent sessions do not flicker
 
 ### Plugin Hooks
 - **SessionStart**: Launches daemon via `scripts/start.sh`
@@ -107,31 +115,32 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Key points:
 - Polls every 3 seconds + uses file watcher
 - Discord must be running for RPC to connect
 - Graceful shutdown on SIGINT/SIGTERM
-- Shows nudge message when using JSONL fallback encouraging statusline setup
+- Shows nudge message when using JSONL fallback
+- Tokens shown are context size (the last request's input, cached tokens included), not a session total
+- Only pushes to Discord when the displayed text changes
+- start.sh/start.ps1 re-download the binary when `<binary>.version` doesn't match `VERSION`, and stop a running daemon from another release first
 
 ## Releasing
 
-Binaries are downloaded from GitHub Releases on first run. To create a new release:
+Binaries are downloaded from GitHub Releases by the start scripts, into `~/.claude/bin/` (outside the plugin folder, so `claude plugin update` never replaces them). The scripts re-download when `<binary>.version` doesn't match their version.
 
-1. **Update version** in these files:
+Users get a new plugin version from `main`, and the start scripts on `main` point at the new release, so the release must exist before `main` moves:
+
+1. **On a branch, update the version** in all four places, then open a PR:
    - `scripts/start.sh` - `VERSION="vX.X.X"`
    - `scripts/start.ps1` - `$Version = "vX.X.X"`
    - `.claude-plugin/plugin.json` - `"version": "X.X.X"` (no 'v' prefix)
+   - `.claude-plugin/marketplace.json` - `"version": "X.X.X"`
 
-2. **Build all binaries:**
+2. **Tag the PR's head commit** (rebased on current `main`) and push the tag:
    ```bash
-   ./scripts/build.sh
+   git tag -a vX.X.X -m "vX.X.X" && git push origin vX.X.X
+   ```
+   The Release workflow (`.github/workflows/release.yml`) checks that all four versions match the tag, runs the tests, builds all binaries and creates the GitHub release. If it fails, nothing has reached users: fix, delete the tag and release, retag.
+
+3. **After the release succeeds, fast-forward `main`** to the tagged commit (GitHub marks the PR merged):
+   ```bash
+   git push origin vX.X.X^{commit}:main
    ```
 
-3. **Commit and tag:**
-   ```bash
-   git add scripts/start.sh scripts/start.ps1 .claude-plugin/plugin.json
-   git commit -m "Bump version to vX.X.X"
-   git tag vX.X.X
-   git push origin main --tags
-   ```
-
-4. **Create GitHub release:**
-   ```bash
-   gh release create vX.X.X bin/* --title "vX.X.X" --generate-notes
-   ```
+4. **Replace the generated release notes** with hand-written ones: `gh release edit vX.X.X --notes-file notes.md`

@@ -10,7 +10,7 @@ $PidFile = Join-Path $ClaudeDir "discord-presence.pid"
 $LogFile = Join-Path $ClaudeDir "discord-presence.log"
 $RefcountFile = Join-Path $ClaudeDir "discord-presence.refcount"
 $Repo = "Jerit3787/cc-discord-presence"
-$Version = "v1.0.6"
+$Version = "v1.0.7"
 
 # Ensure directories exist
 New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
@@ -24,39 +24,52 @@ if (Test-Path $RefcountFile) {
 $ActiveSessions = $CurrentCount + 1
 $ActiveSessions | Out-File -FilePath $RefcountFile -Encoding ASCII -NoNewline
 
-# If daemon is already running, just exit
+$BinaryName = "cc-discord-presence-windows-amd64.exe"
+$Binary = Join-Path $BinDir $BinaryName
+$VersionFile = "$Binary.version"
+$InstalledVersion = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { "" }
+
+# If the daemon is already running, just exit, unless it runs a binary from
+# another release: then stop it so the current one is downloaded and started.
+# (claude plugin update replaces this script, never the binary.)
 if (Test-Path $PidFile) {
     $OldPid = Get-Content $PidFile -ErrorAction SilentlyContinue
     if ($OldPid) {
-        $Process = Get-Process -Id $OldPid -ErrorAction SilentlyContinue
+        $Process = Get-Process -Id $OldPid -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "cc-discord-presence*" }
         if ($Process) {
-            Write-Host "Discord Rich Presence already running (PID: $OldPid, sessions: $ActiveSessions)"
-            exit 0
+            if ($InstalledVersion -eq $Version) {
+                Write-Host "Discord Rich Presence already running (PID: $OldPid, sessions: $ActiveSessions)"
+                exit 0
+            }
+            Write-Host "Updating the running daemon to $Version..."
+            Stop-Process -Id $OldPid -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
         }
     }
 }
 
-$BinaryName = "cc-discord-presence-windows-amd64.exe"
-$Binary = Join-Path $BinDir $BinaryName
-$VersionFile = Join-Path $BinDir ".version"
-
-# Download the binary if it is missing or from a different version
-$InstalledVersion = ""
-if (Test-Path $VersionFile) {
-    $InstalledVersion = (Get-Content $VersionFile -ErrorAction SilentlyContinue)
-}
-if ((-not (Test-Path $Binary)) -or ($InstalledVersion -ne $Version)) {
+# Download the binary when it is missing or from another release. The
+# version file beside it records which release it came from; installs from
+# before it existed have none and update once.
+if (-not (Test-Path $Binary) -or $InstalledVersion -ne $Version) {
     Write-Host "Downloading cc-discord-presence $Version for windows-amd64..."
 
     $DownloadUrl = "https://github.com/$Repo/releases/download/$Version/$BinaryName"
+    $TmpBinary = "$Binary.download"
 
     try {
-        Invoke-WebRequest -Uri $DownloadUrl -OutFile $Binary -UseBasicParsing
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpBinary -UseBasicParsing
+        Move-Item -Path $TmpBinary -Destination $Binary -Force
         $Version | Out-File -FilePath $VersionFile -Encoding ASCII -NoNewline
         Write-Host "Downloaded successfully!"
     } catch {
-        Write-Error "Failed to download binary: $_"
-        exit 1
+        # Keep a binary from an earlier release rather than none
+        Remove-Item -Path $TmpBinary -ErrorAction SilentlyContinue
+        if (-not (Test-Path $Binary)) {
+            Write-Error "Failed to download binary: $_"
+            exit 1
+        }
+        Write-Warning "Download failed; using the existing binary: $_"
     }
 
     # Retire a running daemon so the block below starts the new binary
@@ -75,7 +88,7 @@ if (-not (Test-Path $Binary)) {
 }
 
 # Start the daemon in background
-$Process = Start-Process -FilePath $Binary -NoNewWindow -PassThru -RedirectStandardOutput $LogFile -RedirectStandardError $LogFile
+$Process = Start-Process -FilePath $Binary -NoNewWindow -PassThru -RedirectStandardOutput $LogFile -RedirectStandardError "$LogFile.err"
 $Process.Id | Out-File -FilePath $PidFile -Encoding ASCII
 
 Write-Host "Discord Rich Presence started (PID: $($Process.Id), sessions: $ActiveSessions)"

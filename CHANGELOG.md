@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-11-02
+
+### Changed
+- **Merged upstream `v1.0.6`**, bringing the hooks module, the Windows daemon
+  start fix, and the update handling from `tsanva/cc-discord-presence`.
+- The **hooks module** (`hooks/register.ts`) is now the primary local data
+  source. It writes `~/.claude/discord-presence-module.json` on session start,
+  prompt submit, each tool call, and each response, and clears it on session
+  end. The statusline file is the fallback for Claude Code versions without
+  hooks modules; JSONL remains the last resort.
+- Tokens shown are now the **context size** (the last request's input, cached
+  tokens included) for every data source, instead of input + output.
+- The daemon only pushes to Discord when the displayed text changes.
+- Reliability-fork behaviour is retained: sticky session selection, automatic
+  Discord reconnect, verified session counting, model names derived from the
+  model ID, cache-aware cost pricing, and large-transcript-line parsing.
+- Cloud-session detection (released as fork `1.0.6`) now also counts
+  hooks-module activity when deciding whether a local session is newer.
+
+### Fixed
+- Windows: the daemon now starts (`start.ps1` uses a separate `.log.err` file),
+  and `start.ps1`/`stop.ps1` only trust a PID that belongs to the daemon.
+- Start scripts re-download the binary when the installed one is from another
+  release, and restart a running daemon from an older release, so
+  `claude plugin update` actually reaches the daemon.
+
+### Contributors
+- Yehor ([@10kkyvl](https://github.com/10kkyvl)) - Windows daemon start fix
+
 ## [1.0.6] - 2026-11-02
 
 ### Added
@@ -58,8 +87,8 @@ Reliability fork ([Jerit3787/cc-discord-presence](https://github.com/Jerit3787/c
 - Model display names are derived from the model ID (e.g. `claude-sonnet-5` ->
   "Sonnet 5") instead of a hardcoded table that goes stale on every release.
   Added current-generation pricing entries.
-- JSONL fallback now includes cache-read and cache-creation tokens in the token
-  count, and prices them relative to the input rate, for a closer cost estimate.
+- JSONL fallback prices cache-read and cache-creation tokens relative to the
+  input rate for a closer cost estimate.
 - Discord elapsed timer uses the real session start (first transcript timestamp)
   rather than daemon uptime.
 
@@ -104,7 +133,10 @@ Reliability fork ([Jerit3787/cc-discord-presence](https://github.com/Jerit3787/c
 - Automatic binary download on first run
 - GitHub Actions workflow for automated releases
 
-[Unreleased]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.5...v1.0.6
+[1.0.5]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/tsanva/cc-discord-presence/compare/v1.0.0...v1.0.1

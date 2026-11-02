@@ -12,7 +12,7 @@ LOG_FILE="$CLAUDE_DIR/discord-presence.log"
 SESSIONS_DIR="$CLAUDE_DIR/discord-presence-sessions"
 REFCOUNT_FILE="$CLAUDE_DIR/discord-presence.refcount"
 REPO="Jerit3787/cc-discord-presence"
-VERSION="v1.0.6"
+VERSION="v1.0.7"
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -66,15 +66,6 @@ else
     done
 fi
 
-# If daemon is already running, just exit
-if [[ -f "$PID_FILE" ]]; then
-    OLD_PID=$(cat "$PID_FILE")
-    if process_exists "$OLD_PID"; then
-        echo "Discord Rich Presence already running (PID: $OLD_PID, sessions: $ACTIVE_SESSIONS)"
-        exit 0
-    fi
-fi
-
 # Detect architecture
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -87,32 +78,60 @@ if [[ "$OS" == "windows" ]]; then
     BINARY_NAME="${BINARY_NAME}.exe"
 fi
 BINARY="$BIN_DIR/$BINARY_NAME"
-VERSION_FILE="$BIN_DIR/.version"
+VERSION_FILE="$BINARY.version"
 
-# Download the binary if it is missing or left over from a different version.
-# (Without the version check, `plugin update` never refreshes the binary
-# because the file already exists.)
-INSTALLED_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "")
-if [[ ! -f "$BINARY" || "$INSTALLED_VERSION" != "$VERSION" ]]; then
+# If the daemon is already running, just exit, unless it runs a binary from
+# another release: then stop it so the current one is downloaded and started.
+# (claude plugin update replaces this script, never the binary.)
+if [[ -f "$PID_FILE" ]]; then
+    OLD_PID=$(cat "$PID_FILE")
+    if process_exists "$OLD_PID"; then
+        if [[ "$(cat "$VERSION_FILE" 2>/dev/null)" == "$VERSION" ]]; then
+            echo "Discord Rich Presence already running (PID: $OLD_PID, sessions: $ACTIVE_SESSIONS)"
+            exit 0
+        fi
+        echo "Updating the running daemon to ${VERSION}..."
+        if $IS_WINDOWS; then
+            taskkill //PID "$OLD_PID" //F > /dev/null 2>&1 || true
+        else
+            kill "$OLD_PID" 2>/dev/null || true
+        fi
+        sleep 1
+    fi
+fi
+
+# Download the binary when it is missing or from another release. The
+# version file beside it records which release it came from; installs from
+# before it existed have none and update once.
+if [[ ! -f "$BINARY" || "$(cat "$VERSION_FILE" 2>/dev/null)" != "$VERSION" ]]; then
     echo "Downloading cc-discord-presence ${VERSION} for ${OS}-${ARCH}..."
 
     DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}"
+    TMP_BINARY="$BINARY.download"
 
+    # set -e is on: capture a failed download instead of exiting on it
+    DOWNLOAD_STATUS=0
     if command -v curl &> /dev/null; then
-        curl -fsSL "$DOWNLOAD_URL" -o "$BINARY"
+        curl -fsSL "$DOWNLOAD_URL" -o "$TMP_BINARY" || DOWNLOAD_STATUS=$?
     elif command -v wget &> /dev/null; then
-        wget -q "$DOWNLOAD_URL" -O "$BINARY"
+        wget -q "$DOWNLOAD_URL" -O "$TMP_BINARY" || DOWNLOAD_STATUS=$?
     else
         echo "Error: curl or wget required to download binary" >&2
         exit 1
     fi
 
-    if ! $IS_WINDOWS; then
-        chmod +x "$BINARY"
+    if [[ $DOWNLOAD_STATUS -eq 0 && -s "$TMP_BINARY" ]]; then
+        mv -f "$TMP_BINARY" "$BINARY"
+        if ! $IS_WINDOWS; then
+            chmod +x "$BINARY"
+        fi
+        echo "$VERSION" > "$VERSION_FILE"
+        echo "Downloaded successfully!"
+    else
+        # Keep a binary from an earlier release rather than none
+        rm -f "$TMP_BINARY"
+        echo "Warning: download failed; using the existing binary if present" >&2
     fi
-    echo "$VERSION" > "$VERSION_FILE"
-    echo "Downloaded successfully!"
-
     # A newer binary is on disk; retire the running daemon so the next block
     # starts the new one.
     if [[ -f "$PID_FILE" ]]; then

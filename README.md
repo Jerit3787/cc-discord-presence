@@ -5,8 +5,10 @@ Show your Claude Code session on Discord! Display your current project, git bran
 > **Reliability fork** of [tsanva/cc-discord-presence](https://github.com/tsanva/cc-discord-presence).
 > Adds sticky session selection (no more flickering between projects when
 > multiple Claude Code sessions run at once), automatic Discord reconnect, a
-> self-healing session counter, and model names derived from the model ID.
-> See the [changelog](CHANGELOG.md#104---2026-09-10).
+> self-healing session counter, model names derived from the model ID, and
+> cloud-session detection. Since 1.0.7 it also includes upstream's hooks module,
+> Windows daemon fix, and update handling.
+> See the [changelog](CHANGELOG.md).
 
 ## Platform Support
 
@@ -29,7 +31,7 @@ Show your Claude Code session on Discord! Display your current project, git bran
 - **Project Name** - Displays the current project you're working on
 - **Git Branch** - Shows your current git branch
 - **Model Name** - Shows which Claude model you're using (derived from the model ID, e.g. "Sonnet 5")
-- **Total Tokens** - Token usage counter (input + output)
+- **Context Size** - Tokens in Claude's context window right now (cached tokens included)
 - **Total Cost** - Real-time cost tracking for your session
 - **Cloud Sessions** - Detects Claude Code cloud sessions from the Claude desktop app
 
@@ -47,6 +49,17 @@ claude plugin install cc-discord-presence@cc-discord-presence
 
 That's it! The plugin will automatically start when you begin a Claude Code session and stop when you exit.
 
+### Updating
+
+```bash
+claude plugin marketplace update cc-discord-presence
+claude plugin update cc-discord-presence@cc-discord-presence
+```
+
+Then start a new Claude Code session. The plugin's start script notices that the daemon in `~/.claude/bin/` is from an older release, stops it, downloads the matching one and starts it.
+
+> **Upgrading from 1.0.4 or earlier:** `claude plugin update` only replaces the plugin's own files. The daemon binary lives in `~/.claude/bin/` and, before 1.0.5, was downloaded once and never updated, so you may still be running the daemon from your first install. Updating to 1.0.5 or later fixes this automatically on your next session start. If Discord still doesn't show your project afterwards, delete `~/.claude/bin/cc-discord-presence-*` and start a new session. If you had set up the statusline integration, it keeps working, but on current Claude Code it's no longer needed.
+
 ### Manual Installation
 
 ```bash
@@ -61,17 +74,21 @@ go build -o cc-discord-presence .
 
 ## How It Works
 
-The app reads session data from Claude Code in three ways:
+The app reads session data from four sources. Cloud sessions are checked first; otherwise it uses the hooks module, then the statusline file, then JSONL:
 
-### 1. JSONL Fallback (Zero Config)
+### 1. Hooks Module (Zero Config, Most Accurate)
 
-By default, the app parses Claude Code's session files from `~/.claude/projects/`. This works out of the box with no configuration needed.
+The plugin ships a Claude Code hooks module (`hooks/register.ts`) that writes the session's project, model, context size and cost to `~/.claude/discord-presence-module.json` using Claude Code's own figures. It runs in the terminal, the Claude desktop app and IDE extensions on Claude Code versions with hooks module support, and needs no setup. It updates when a session starts, when you send a prompt, after each tool call, after each response, and clears its data when the session ends.
 
-### 2. Statusline Integration (More Accurate)
+### 2. Statusline Integration (Older Claude Code Versions)
 
-For the most accurate token/cost data, you can configure the statusline integration. This uses Claude Code's own calculations instead of estimating from JSONL.
+On Claude Code versions without hooks modules, you can configure the statusline integration for the same accuracy. On current versions it isn't needed.
 
-### 3. Cloud Sessions (Claude Desktop App)
+### 3. JSONL Fallback
+
+As a last resort, the app parses Claude Code's session files from `~/.claude/projects/`. Cost is estimated from the model pricing table.
+
+### 4. Cloud Sessions (Claude Desktop App)
 
 Cloud sessions run on Anthropic's infrastructure and do not write a transcript to
 `~/.claude/projects/`. When the Claude desktop app is running, the daemon reads
@@ -87,7 +104,9 @@ than your local session; new local activity takes the presence back.
 > manually (`./cc-discord-presence`).
 
 <a name="statusline-setup"></a>
-#### Statusline Setup
+#### Statusline Setup (Optional)
+
+Only needed on Claude Code versions without hooks module support.
 
 **Automatic Setup (Recommended)**:
 
@@ -129,8 +148,9 @@ cat ~/.claude/discord-presence.log
 ```
 
 You'll see one of:
-- `✓ Found active session: project-name (using statusline data)` - Best accuracy
-- `✓ Found active session: project-name (using JSONL fallback)` - Working, but consider setting up statusline
+- `✓ Found active session: project-name (using hooks module)` - Best accuracy, no setup
+- `✓ Found active session: project-name (using statusline data)` - Same accuracy, for older Claude Code versions
+- `✓ Found active session: project-name (using JSONL fallback)` - Working, but cost is estimated; update Claude Code or set up the statusline
 - `✓ Found active session: Cloud session (using cloud session data)` - Claude desktop app cloud session
 
 ## Discord Presence Display
@@ -183,10 +203,10 @@ per 1M tokens:
 
 Cache-read tokens are estimated at 0.1× the input rate and cache-writes at 1.25×
 (the 5-minute rate; 1-hour cache writes actually cost 2×, which the transcript
-doesn't distinguish). Cache tokens count toward the cost estimate but **not** the
-displayed token number, which stays cumulative input + output. For exact
-figures, use the statusline integration — it reports Claude Code's own
-`total_cost_usd`.
+doesn't distinguish). Cache tokens count toward the cost estimate. The displayed
+token number is the context size (the last request's input, cached tokens
+included). For exact figures, use the hooks module or statusline integration —
+they report Claude Code's own `total_cost_usd`.
 
 ## Advanced: Custom Discord App
 

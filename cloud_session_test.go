@@ -277,16 +277,19 @@ func TestDesktopLocalStorageDirs(t *testing.T) {
 func TestLatestLocalActivityUsesNewestTranscript(t *testing.T) {
 	origProjectsDir := projectsDir
 	origDataFilePath := dataFilePath
+	origModuleFilePath := moduleFilePath
 	origShownKey := shownKey
 	defer func() {
 		projectsDir = origProjectsDir
 		dataFilePath = origDataFilePath
+		moduleFilePath = origModuleFilePath
 		shownKey = origShownKey
 	}()
 
 	dir := t.TempDir()
 	projectsDir = dir
 	dataFilePath = filepath.Join(dir, "missing-statusline.json")
+	moduleFilePath = filepath.Join(dir, "missing-module.json")
 
 	mkSession := func(project, name string, age time.Duration) (string, time.Time) {
 		projectDir := filepath.Join(dir, project)
@@ -312,6 +315,44 @@ func TestLatestLocalActivityUsesNewestTranscript(t *testing.T) {
 
 	if got := latestLocalActivity(); !got.Equal(newMod) {
 		t.Errorf("latestLocalActivity() = %v, want newest transcript %v", got, newMod)
+	}
+}
+
+func TestLatestLocalActivityIgnoresBlankedModule(t *testing.T) {
+	origProjectsDir := projectsDir
+	origDataFilePath := dataFilePath
+	origModuleFilePath := moduleFilePath
+	defer func() {
+		projectsDir = origProjectsDir
+		dataFilePath = origDataFilePath
+		moduleFilePath = origModuleFilePath
+	}()
+
+	dir := t.TempDir()
+	projectsDir = dir
+	dataFilePath = filepath.Join(dir, "missing-statusline.json")
+	moduleFilePath = filepath.Join(dir, "module.json")
+	if err := os.WriteFile(moduleFilePath, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := filepath.Join(dir, "-Users-test-old")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(projectDir, "old.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"type":"user"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(transcript, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// The module's "{}" means its session ended; its write time must not count
+	// as local activity and keep a cloud session from taking over.
+	if got := latestLocalActivity(); !got.Equal(old) {
+		t.Errorf("latestLocalActivity() = %v, want old transcript %v", got, old)
 	}
 }
 
