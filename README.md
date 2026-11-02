@@ -103,6 +103,10 @@ than your local session; new local activity takes the presence back.
 > with any local Claude Code session; if you only use cloud sessions, start it
 > manually (`./cc-discord-presence`).
 
+The daemon clears the Discord presence and exits after 30 seconds without a live
+local Claude Code session or an active cloud session, so an abnormal app close
+does not leave stale presence behind.
+
 <a name="statusline-setup"></a>
 #### Statusline Setup (Optional)
 

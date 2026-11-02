@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-11-02
+
+### Fixed
+- **Stale Discord presence after Claude closed.** The daemon is detached from
+  the app and only the plugin's `SessionEnd` hook stopped it, so closing the
+  desktop app abnormally (or starting the daemon manually) left the last
+  project on Discord forever. It now checks the session registry and, after 30
+  seconds with no live local session or active cloud session, clears the
+  presence and exits.
+
 ## [1.0.7] - 2026-11-02
 
 ### Changed

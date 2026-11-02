@@ -781,6 +781,8 @@ func watchForChanges() {
 	ticker := time.NewTicker(PollInterval)
 	defer ticker.Stop()
 
+	var noSessionsSince time.Time
+
 	for {
 		select {
 		case event, ok := <-watcher.Events:
@@ -799,10 +801,12 @@ func watchForChanges() {
 			}
 			fmt.Fprintf(os.Stderr, "Watcher error: %v\n", err)
 		case <-ticker.C:
-			// Poll reads from either statusline or JSONL fallback
+			// Poll reads from the hooks module, statusline, cloud sessions,
+			// or JSONL fallback.
 			if session := readSessionData(); session != nil {
 				updatePresence(session)
 			}
+			shutdownIfIdle(&noSessionsSince)
 		}
 	}
 }
@@ -811,9 +815,11 @@ func pollForChanges() {
 	ticker := time.NewTicker(PollInterval)
 	defer ticker.Stop()
 
+	var noSessionsSince time.Time
 	for range ticker.C {
 		if session := readSessionData(); session != nil {
 			updatePresence(session)
 		}
+		shutdownIfIdle(&noSessionsSince)
 	}
 }
