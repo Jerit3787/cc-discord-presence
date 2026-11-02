@@ -145,6 +145,44 @@ func TestClientConnectDialError(t *testing.T) {
 	}
 }
 
+func TestClientReadLoopHandlesClose(t *testing.T) {
+	mock := &mockConn{}
+	mock.writeFrame(opClose, []byte(`{"code":1000,"message":"bye"}`))
+
+	client := NewClient("test")
+	client.conn = mock
+	client.readLoop(mock)
+
+	if client.conn != nil {
+		t.Error("readLoop left a closed connection active")
+	}
+	if !mock.closed {
+		t.Error("readLoop did not close the connection")
+	}
+}
+
+func TestClientReadLoopRepliesToPing(t *testing.T) {
+	mock := &mockConn{}
+	ping := []byte(`{"hello":"world"}`)
+	mock.writeFrame(opPing, ping)
+
+	client := NewClient("test")
+	client.conn = mock
+	client.readLoop(mock)
+
+	frame := mock.writeBuffer.Bytes()
+	if len(frame) < 8 {
+		t.Fatalf("no PONG frame written: %d bytes", len(frame))
+	}
+	if got := int(binary.LittleEndian.Uint32(frame[0:4])); got != opPong {
+		t.Errorf("PONG opcode = %d, want %d", got, opPong)
+	}
+	length := int(binary.LittleEndian.Uint32(frame[4:8]))
+	if !bytes.Equal(frame[8:8+length], ping) {
+		t.Errorf("PONG payload = %q, want %q", frame[8:8+length], ping)
+	}
+}
+
 func TestClientCloseClearsConnection(t *testing.T) {
 	client := NewClient("test")
 	mock := &mockConn{}

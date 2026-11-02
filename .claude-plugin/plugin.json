@@ -1,6 +1,6 @@
 {
   "name": "cc-discord-presence",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Discord Rich Presence for Claude Code - Show your session on Discord",
   "author": {
     "name": "tsanva",
@@ -17,7 +17,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/start.sh\"",
-            "timeout": 10
+            "timeout": 60
           }
         ]
       }

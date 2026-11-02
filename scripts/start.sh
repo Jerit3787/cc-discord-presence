@@ -11,8 +11,9 @@ PID_FILE="$CLAUDE_DIR/discord-presence.pid"
 LOG_FILE="$CLAUDE_DIR/discord-presence.log"
 SESSIONS_DIR="$CLAUDE_DIR/discord-presence-sessions"
 REFCOUNT_FILE="$CLAUDE_DIR/discord-presence.refcount"
+LOCK_DIR="$CLAUDE_DIR/discord-presence.lock"
 REPO="Jerit3787/cc-discord-presence"
-VERSION="v1.0.9"
+VERSION="v1.0.10"
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -87,6 +88,27 @@ if [[ "$OS" == "windows" ]]; then
 fi
 BINARY="$BIN_DIR/$BINARY_NAME"
 VERSION_FILE="$BINARY.version"
+
+# Serialize startup/update so two sessions cannot start duplicate daemons or
+# race on the download. Stale locks older than five minutes are removed.
+acquire_start_lock() {
+    local tries=0
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        tries=$((tries + 1))
+        if [[ $tries -ge 300 ]]; then
+            if find "$LOCK_DIR" -mmin +5 2>/dev/null | grep -q .; then
+                rm -rf "$LOCK_DIR"
+                continue
+            fi
+            echo "Warning: another start is in progress; continuing without the lock" >&2
+            return 1
+        fi
+        sleep 0.2
+    done
+    trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+    return 0
+}
+acquire_start_lock || true
 
 # If the daemon is already running, just exit, unless it runs a binary from
 # another release: then stop it so the current one is downloaded and started.
@@ -167,9 +189,11 @@ if $IS_WINDOWS; then
     # On Windows, convert path to Windows format and use PowerShell
     WIN_BINARY=$(cygpath -w "$BINARY" 2>/dev/null || echo "$BINARY")
     WIN_PID_FILE=$(cygpath -w "$PID_FILE" 2>/dev/null || echo "$PID_FILE")
+    WIN_LOG=$(cygpath -w "$LOG_FILE" 2>/dev/null || echo "$LOG_FILE")
+    WIN_LOG_ERR=$(cygpath -w "$LOG_FILE.err" 2>/dev/null || echo "$LOG_FILE.err")
 
     # Use PowerShell to start the process and capture PID (hidden window)
-    powershell.exe -NoProfile -WindowStyle Hidden -Command '$env:CCDP_MANAGED="1"; $process = Start-Process -FilePath "'"$WIN_BINARY"'" -WindowStyle Hidden -PassThru; $process.Id | Out-File -FilePath "'"$WIN_PID_FILE"'" -Encoding ASCII -NoNewline' 2>/dev/null
+    powershell.exe -NoProfile -WindowStyle Hidden -Command '$env:CCDP_MANAGED="1"; $process = Start-Process -FilePath "'"$WIN_BINARY"'" -WindowStyle Hidden -PassThru -RedirectStandardOutput "'"$WIN_LOG"'" -RedirectStandardError "'"$WIN_LOG_ERR"'"; $process.Id | Out-File -FilePath "'"$WIN_PID_FILE"'" -Encoding ASCII -NoNewline' 2>/dev/null
 else
     CCDP_MANAGED=1 nohup "$BINARY" > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.10] - 2026-11-02
+
+### Fixed
+- **Concurrent sessions no longer flicker** between the hooks-module and
+  statusline sources. The daemon holds the current session for
+  `StickyQuietPeriod` even though those sources use one last-writer-wins file.
+- **Discord IPC now has a background read loop.** It handles PING/PONG,
+  surfaces ERROR responses, and marks the connection dead on CLOSE/EOF so the
+  next update reconnects. I/O deadlines prevent a hung Discord from blocking
+  shutdown.
+- **Windows refcount is validated against running Claude processes** instead of
+  trusting a number left by a crash, and start/stop serialize refcount updates
+  with a named mutex.
+- **Startup scripts are lock-protected** so two sessions cannot launch duplicate
+  daemons or race on the binary download. The start hook timeout is 60s to cover
+  a slow update.
+- **`setup-statusline.sh` now backs up the whole statusLine object**, preserves
+  extra keys, refuses to overwrite an existing `statusline.sh`, and only reports
+  success when the settings update actually succeeded.
+- **JSONL cost is accumulated per model** instead of pricing all historical
+  tokens at the last model used.
+- **A newest transcript with no assistant data no longer hides older valid
+  sessions.**
+- **Cloud Local Storage reads** retry a racing snapshot once, cache for 15s,
+  accept older Chromium key formats, and choose deterministically between equal
+  timestamps or multiple databases.
+- **PowerShell state files are validated** before use, so a corrupt PID or
+  refcount cannot abort the hooks.
+
 ## [1.0.9] - 2026-11-02
 
 ### Fixed

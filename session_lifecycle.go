@@ -66,6 +66,20 @@ func trackedProcessAlive(pid int) bool {
 	return strings.Contains(strings.ToLower(string(out)), "claude")
 }
 
+// windowsSessionAlive validates a Windows refcount against a process list. A
+// positive refcount alone is not enough: an abnormal close leaves it behind.
+// A failed process listing is unknown, not dead.
+func windowsSessionAlive(refcount int, processList string, listErr error) bool {
+	if refcount <= 0 {
+		return false
+	}
+	if listErr != nil {
+		return true
+	}
+	lower := strings.ToLower(processList)
+	return strings.Contains(lower, "claude.exe") || strings.Contains(lower, "claude-code")
+}
+
 // anySessionAlive checks the same session registry the start/stop hooks use.
 // Windows tracks sessions with a refcount instead of PID files.
 func anySessionAlive() bool {
@@ -75,7 +89,11 @@ func anySessionAlive() bool {
 			return false
 		}
 		count, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		return err == nil && count > 0
+		if err != nil {
+			return false
+		}
+		out, listErr := exec.Command("tasklist", "/NH", "/FO", "CSV").Output()
+		return windowsSessionAlive(count, string(out), listErr)
 	}
 	return anyTrackedSessionAlive(
 		filepath.Join(claudeDir, "discord-presence-sessions"),

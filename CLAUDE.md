@@ -118,9 +118,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Key points:
 - Graceful shutdown on SIGINT/SIGTERM
 - Shows nudge message when using JSONL fallback
 - Tokens shown are context size (the last request's input, cached tokens included), not a session total
-- Only pushes to Discord when the displayed text changes
+- Only pushes to Discord when the displayed text changes; a 30s heartbeat re-sends it in case Discord restarted
+- Hooks-module/statusline sessions are sticky for 75s even though each source uses one last-writer-wins file
+- Discord IPC has a background read loop for PING/CLOSE/ERROR and 5s I/O deadlines
 - Plugin-managed daemons clear the presence and exit after 30s with no live local session (PID registry) and no active cloud session; this covers abnormal app closes where `SessionEnd` never runs. Manually started daemons stay until Ctrl+C
-- start.sh/start.ps1 re-download the binary when `<binary>.version` doesn't match `VERSION`, and stop a running daemon from another release first
+- Windows refcount updates are mutex-protected and validated against a live Claude process before being trusted
+- start.sh/start.ps1 re-download the binary when `<binary>.version` doesn't match `VERSION`, and stop a running daemon from another release first; startup is lock-protected
 
 ## Releasing
 

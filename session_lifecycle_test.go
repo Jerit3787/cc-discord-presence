@@ -54,6 +54,21 @@ func TestProcessExists(t *testing.T) {
 	}
 }
 
+func TestWindowsSessionAlive(t *testing.T) {
+	if windowsSessionAlive(0, `"claude.exe","1"`, nil) {
+		t.Error("zero refcount should be dead")
+	}
+	if !windowsSessionAlive(1, `"claude.exe","1"`, nil) {
+		t.Error("positive refcount with claude.exe should be alive")
+	}
+	if windowsSessionAlive(1, `"node.exe","1"`, nil) {
+		t.Error("positive refcount with no Claude process should be dead")
+	}
+	if !windowsSessionAlive(1, "", os.ErrPermission) {
+		t.Error("a failed process listing should be unknown, not dead")
+	}
+}
+
 func TestIdleExitEnabled(t *testing.T) {
 	t.Setenv("CCDP_MANAGED", "")
 	if idleExitEnabled() {

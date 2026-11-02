@@ -36,6 +36,12 @@ const (
 	cloudResultKey     = "epitaxy-session-result:"
 )
 
+// Older Chromium builds omit the \x01 version byte from localStorage keys.
+var localStorageKeyPrefixes = [][]byte{
+	[]byte(localStorageKeyPrefix),
+	[]byte("_https://claude.ai\x00"),
+}
+
 // cloudSession is a Claude Code cloud session as reported by the desktop app's
 // local storage. The cloud VM keeps the transcript; the desktop app only keeps
 // a small activity record, model pill, and per-session usage result locally.
@@ -80,6 +86,8 @@ func desktopLocalStorageDirs() []string {
 func readCloudSessions() ([]cloudSession, error) {
 	var lastErr error
 	hadDatabase := false
+	var all []cloudSession
+	seen := make(map[string]bool)
 
 	for _, dir := range desktopLocalStorageDirs() {
 		if _, err := os.Stat(dir); err != nil {
@@ -95,11 +103,23 @@ func readCloudSessions() ([]cloudSession, error) {
 			lastErr = err
 			continue
 		}
-		if sessions := parseCloudSessions(store); len(sessions) > 0 {
-			return sessions, nil
+		for _, session := range parseCloudSessions(store) {
+			if !seen[session.ID] {
+				seen[session.ID] = true
+				all = append(all, session)
+			}
 		}
 	}
 
+	if len(all) > 0 {
+		sort.SliceStable(all, func(i, j int) bool {
+			if all[i].LastActive.Equal(all[j].LastActive) {
+				return all[i].ID < all[j].ID
+			}
+			return all[i].LastActive.After(all[j].LastActive)
+		})
+		return all, nil
+	}
 	if hadDatabase && lastErr != nil {
 		return nil, lastErr
 	}
@@ -108,7 +128,7 @@ func readCloudSessions() ([]cloudSession, error) {
 
 // cloudStoreCache avoids re-opening (and, on Windows, re-copying) the desktop
 // app's Local Storage twice per poll and on every watcher event.
-const cloudStoreCacheTTL = 5 * time.Second
+const cloudStoreCacheTTL = 15 * time.Second
 
 var (
 	cloudStoreMu       sync.Mutex
@@ -140,7 +160,17 @@ func readLocalStorage(dir string) (map[string]string, error) {
 	if err == nil {
 		return store, nil
 	}
-	return readLocalStorageCopy(dir)
+
+	// The live database is usually locked by Chromium. A copy can still race a
+	// compaction/rotation, so retry once before reporting "unknown".
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		store, lastErr = readLocalStorageCopy(dir)
+		if lastErr == nil {
+			return store, nil
+		}
+	}
+	return nil, lastErr
 }
 
 // readLocalStorageCopy copies the database to a temporary directory and reads
@@ -176,15 +206,13 @@ func readLocalStorageDirect(dir string) (map[string]string, error) {
 	iter := db.NewIterator(nil, nil)
 	defer iter.Release()
 
-	prefix := []byte(localStorageKeyPrefix)
 	for iter.Next() {
-		key := iter.Key()
-		if !bytes.HasPrefix(key, prefix) {
+		name, ok := localStorageName(iter.Key())
+		if !ok {
 			continue
 		}
 		// Keep only the cloud-session keys; the rest of the app's local
 		// storage is not our data.
-		name := string(key[len(prefix):])
 		if name != cloudDurabilityKey && name != cloudPillsKey && !strings.HasPrefix(name, cloudResultKey) {
 			continue
 		}
@@ -194,6 +222,17 @@ func readLocalStorageDirect(dir string) (map[string]string, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+// localStorageName strips the claude.ai origin prefix from a Chromium
+// localStorage key, accepting both the current and older key formats.
+func localStorageName(key []byte) (string, bool) {
+	for _, prefix := range localStorageKeyPrefixes {
+		if bytes.HasPrefix(key, prefix) {
+			return string(key[len(prefix):]), true
+		}
+	}
+	return "", false
 }
 
 // decodeLocalStorageValue decodes Chromium's localStorage encoding: a leading
@@ -258,6 +297,9 @@ func parseCloudSessions(store map[string]string) []cloudSession {
 	}
 
 	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].LastActive.Equal(sessions[j].LastActive) {
+			return sessions[i].ID < sessions[j].ID
+		}
 		return sessions[i].LastActive.After(sessions[j].LastActive)
 	})
 	return sessions
@@ -306,7 +348,8 @@ func dominantModel(perModel map[string]struct {
 func activeCloudSession(sessions []cloudSession, localActivity, now time.Time) *cloudSession {
 	var newest *cloudSession
 	for i := range sessions {
-		if newest == nil || sessions[i].LastActive.After(newest.LastActive) {
+		if newest == nil || sessions[i].LastActive.After(newest.LastActive) ||
+			(sessions[i].LastActive.Equal(newest.LastActive) && sessions[i].ID < newest.ID) {
 			newest = &sessions[i]
 		}
 	}

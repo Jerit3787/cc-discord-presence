@@ -441,6 +441,27 @@ invalid json line
 	}
 }
 
+func TestParseJSONLSessionCostPerModel(t *testing.T) {
+	tmpDir := t.TempDir()
+	content := `{"type":"user","cwd":"/Users/test/mixed"}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20241022","usage":{"input_tokens":1000000}}}
+{"type":"assistant","message":{"model":"claude-opus-4-5-20251101","usage":{"input_tokens":1000000}}}`
+	testFile := filepath.Join(tmpDir, "mixed.jsonl")
+	if err := os.WriteFile(testFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := parseJSONLSession(testFile, "")
+	if got == nil {
+		t.Fatal("parseJSONLSession() = nil")
+	}
+	// $1/M for Haiku 4.5 plus $15/M for Opus 4.5. Pricing everything at the
+	// last model would report $30.
+	if diff := got.TotalCost - 16.0; diff > 0.0001 || diff < -0.0001 {
+		t.Errorf("TotalCost = %v, want 16.0", got.TotalCost)
+	}
+}
+
 // TestParseJSONLSessionLargeLine ensures a transcript line larger than any
 // scanner buffer (pasted image, big file dump) does not stop the parse and
 // freeze the token total — messages after it must still be counted.
@@ -730,12 +751,17 @@ func TestReadSessionDataPriority(t *testing.T) {
 	origData, origModule, origProjects := dataFilePath, moduleFilePath, projectsDir
 	origSource, origNudge := currentSource, nudgeShown
 	origClouds := cloudSessionsSource
+	origFileSession, origShownKey, origShownSince := fileSession, shownKey, shownSince
 	defer func() {
 		dataFilePath, moduleFilePath, projectsDir = origData, origModule, origProjects
 		currentSource, nudgeShown = origSource, origNudge
 		cloudSessionsSource = origClouds
+		fileSession, shownKey, shownSince = origFileSession, origShownKey, origShownSince
 	}()
 	cloudSessionsSource = func() ([]cloudSession, error) { return nil, nil }
+	fileSession = fileSessionCache{}
+	shownKey = ""
+	shownSince = time.Time{}
 
 	tmpDir := t.TempDir()
 	dataFilePath = filepath.Join(tmpDir, "discord-presence-data.json")
@@ -781,6 +807,9 @@ func TestReadSessionDataPriority(t *testing.T) {
 				write(moduleFilePath, tt.module)
 			}
 			currentSource = ""
+			fileSession = fileSessionCache{}
+			shownKey = ""
+			shownSince = time.Time{}
 
 			got := readSessionData()
 			if tt.wantProject == "" {
@@ -812,13 +841,18 @@ func TestReadSessionDataPrefersNewerStatusline(t *testing.T) {
 	origClouds := cloudSessionsSource
 	origDesktop := desktopAppRunningFn
 	origShownKey, origShownSince := shownKey, shownSince
+	origFileSession := fileSession
 	defer func() {
 		dataFilePath, moduleFilePath, projectsDir = origData, origModule, origProjects
 		currentSource, nudgeShown = origSource, origNudge
 		cloudSessionsSource = origClouds
 		desktopAppRunningFn = origDesktop
 		shownKey, shownSince = origShownKey, origShownSince
+		fileSession = origFileSession
 	}()
+	fileSession = fileSessionCache{}
+	shownKey = ""
+	shownSince = time.Time{}
 	cloudSessionsSource = func() ([]cloudSession, error) { return nil, nil }
 	desktopAppRunningFn = func() bool { return false }
 	nudgeShown = true
@@ -850,6 +884,112 @@ func TestReadSessionDataPrefersNewerStatusline(t *testing.T) {
 	}
 	if currentSource != sourceStatusLine {
 		t.Errorf("currentSource = %q, want %q", currentSource, sourceStatusLine)
+	}
+}
+
+func TestReadSessionDataHoldsPreviousFileSession(t *testing.T) {
+	origData, origModule, origProjects := dataFilePath, moduleFilePath, projectsDir
+	origSource, origNudge := currentSource, nudgeShown
+	origClouds := cloudSessionsSource
+	origDesktop := desktopAppRunningFn
+	origFileSession, origShownKey, origShownSince := fileSession, shownKey, shownSince
+	defer func() {
+		dataFilePath, moduleFilePath, projectsDir = origData, origModule, origProjects
+		currentSource, nudgeShown = origSource, origNudge
+		cloudSessionsSource = origClouds
+		desktopAppRunningFn = origDesktop
+		fileSession, shownKey, shownSince = origFileSession, origShownKey, origShownSince
+	}()
+	cloudSessionsSource = func() ([]cloudSession, error) { return nil, nil }
+	desktopAppRunningFn = func() bool { return false }
+	nudgeShown = true
+	fileSession = fileSessionCache{}
+	shownKey = ""
+	shownSince = time.Time{}
+
+	tmpDir := t.TempDir()
+	dataFilePath = filepath.Join(tmpDir, "missing-statusline.json")
+	moduleFilePath = filepath.Join(tmpDir, "discord-presence-module.json")
+	projectsDir = filepath.Join(tmpDir, "projects")
+
+	write := func(project string) {
+		content := `{"session_id":"s-` + project + `","cwd":"/work/` + project + `",` +
+			`"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},` +
+			`"workspace":{"project_dir":"/work/` + project + `"}}`
+		if err := os.WriteFile(moduleFilePath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("session-a")
+	got := readSessionData()
+	if got == nil || got.ProjectName != "session-a" {
+		t.Fatalf("first read = %+v, want session-a", got)
+	}
+
+	// Another session overwrites the single module file immediately. The
+	// displayed session should not flicker to it yet.
+	write("session-b")
+	got = readSessionData()
+	if got == nil || got.ProjectName != "session-a" {
+		t.Fatalf("sticky read = %+v, want session-a", got)
+	}
+
+	// Once the previous session has been quiet for the sticky period, switch.
+	fileSession.lastSeen = time.Now().Add(-StickyQuietPeriod - time.Second)
+	got = readSessionData()
+	if got == nil || got.ProjectName != "session-b" {
+		t.Fatalf("after quiet period = %+v, want session-b", got)
+	}
+}
+
+func TestReadSessionDataSkipsUnusableJSONL(t *testing.T) {
+	origData, origModule, origProjects := dataFilePath, moduleFilePath, projectsDir
+	origSource, origNudge := currentSource, nudgeShown
+	origClouds := cloudSessionsSource
+	origDesktop := desktopAppRunningFn
+	origFileSession, origShownKey, origShownSince := fileSession, shownKey, shownSince
+	defer func() {
+		dataFilePath, moduleFilePath, projectsDir = origData, origModule, origProjects
+		currentSource, nudgeShown = origSource, origNudge
+		cloudSessionsSource = origClouds
+		desktopAppRunningFn = origDesktop
+		fileSession, shownKey, shownSince = origFileSession, origShownKey, origShownSince
+	}()
+	cloudSessionsSource = func() ([]cloudSession, error) { return nil, nil }
+	desktopAppRunningFn = func() bool { return false }
+	nudgeShown = true
+	fileSession = fileSessionCache{}
+	shownKey = ""
+	shownSince = time.Time{}
+
+	tmpDir := t.TempDir()
+	dataFilePath = filepath.Join(tmpDir, "missing-statusline.json")
+	moduleFilePath = filepath.Join(tmpDir, "missing-module.json")
+	projectsDir = filepath.Join(tmpDir, "projects")
+
+	writeSession := func(project, name, content string, age time.Duration) {
+		dir := filepath.Join(projectsDir, "-Users-test-"+project)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mt := time.Now().Add(-age)
+		if err := os.Chtimes(path, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeSession("bad", "newest.jsonl", `{"type":"user","cwd":"/Users/test/bad"}`, 0)
+	writeSession("good", "older.jsonl", `{"type":"user","cwd":"/Users/test/good"}
+{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","usage":{"input_tokens":1}}}`, time.Minute)
+
+	got := readSessionData()
+	if got == nil || got.ProjectName != "good" {
+		t.Fatalf("readSessionData() = %+v, want good", got)
 	}
 }
 

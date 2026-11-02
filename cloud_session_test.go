@@ -266,6 +266,10 @@ func TestReadLocalStorage(t *testing.T) {
 	if err := db.Put([]byte(localStorageKeyPrefix+"some-secret"), chromiumValue("secret"), nil); err != nil {
 		t.Fatalf("put unrelated claude.ai key: %v", err)
 	}
+	shortKey := "_https://claude.ai\x00code-session-pills"
+	if err := db.Put([]byte(shortKey), chromiumValue(`[["session_01a","claude-sonnet-5","high"]]`), nil); err != nil {
+		t.Fatalf("put old-format key: %v", err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -282,6 +286,9 @@ func TestReadLocalStorage(t *testing.T) {
 	}
 	if _, ok := store["some-secret"]; ok {
 		t.Error("readLocalStorage() included an unrelated claude.ai key")
+	}
+	if got := store["code-session-pills"]; got != `[["session_01a","claude-sonnet-5","high"]]` {
+		t.Errorf("old-format key value = %q", got)
 	}
 
 	// The copy fallback is used when the live database cannot be opened (for

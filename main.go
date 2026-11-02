@@ -130,6 +130,10 @@ type SessionData struct {
 	// counts live on Anthropic's infrastructure, so only locally recorded
 	// model and cost are available.
 	IsCloud bool
+
+	// sessionID identifies a hooks-module/statusline/cloud source for sticky
+	// selection. It is not displayed.
+	sessionID string
 }
 
 // JSONLMessage represents a message entry in JSONL files
@@ -188,6 +192,51 @@ func markShown(key string) time.Time {
 		shownSince = time.Now()
 	}
 	return shownSince
+}
+
+// fileSessionCache is the hooks-module/statusline session currently selected.
+// Those data sources each use a single last-writer-wins file, so when another
+// concurrent session overwrites it, keep the previous session for
+// StickyQuietPeriod instead of flickering between projects.
+type fileSessionCache struct {
+	data     *SessionData
+	id       string
+	source   string
+	lastSeen time.Time
+}
+
+var fileSession fileSessionCache
+
+// applyFileStickiness returns the file-backed session to display. It updates
+// the cache when the same session is seen again and holds the previous session
+// until it has been quiet for StickyQuietPeriod.
+func applyFileStickiness(candidate *SessionData, source string) (*SessionData, string) {
+	now := time.Now()
+	if candidate == nil {
+		return nil, ""
+	}
+
+	if fileSession.data != nil && fileSession.id == candidate.sessionID {
+		candidate.StartTime = fileSession.data.StartTime
+		fileSession.data = candidate
+		fileSession.source = source
+		fileSession.lastSeen = now
+		return candidate, source
+	}
+
+	if shownKey == "file:"+fileSession.id && fileSession.data != nil &&
+		time.Since(fileSession.lastSeen) < StickyQuietPeriod {
+		return fileSession.data, fileSession.source
+	}
+
+	candidate.StartTime = markShown("file:" + candidate.sessionID)
+	fileSession = fileSessionCache{
+		data:     candidate,
+		id:       candidate.sessionID,
+		source:   source,
+		lastSeen: now,
+	}
+	return candidate, source
 }
 
 func init() {
@@ -270,16 +319,16 @@ func fileNewer(a, b string) bool {
 }
 
 func readStatusLineData() *SessionData {
-	return readPresenceFile(dataFilePath, "sl:")
+	return readPresenceFile(dataFilePath)
 }
 
 // readModuleData reads the file the plugin's hooks module writes. The module
 // blanks it to "{}" when its session ends, which reads as no data.
 func readModuleData() *SessionData {
-	return readPresenceFile(moduleFilePath, "module:")
+	return readPresenceFile(moduleFilePath)
 }
 
-func readPresenceFile(path, keyPrefix string) *SessionData {
+func readPresenceFile(path string) *SessionData {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -317,7 +366,7 @@ func readPresenceFile(path, keyPrefix string) *SessionData {
 		// Context size: the last request's input, cached tokens included.
 		TotalTokens: statusLine.ContextWindow.TotalInputTokens,
 		TotalCost:   statusLine.Cost.TotalCostUSD,
-		StartTime:   markShown(keyPrefix + statusLine.SessionID),
+		sessionID:   statusLine.SessionID,
 	}
 }
 
@@ -431,35 +480,34 @@ func findMostRecentJSONL() (string, string, error) {
 	return files[0].path, files[0].projectPath, nil
 }
 
-// pickJSONLSession chooses which transcript to display, applying a stickiness
-// rule: keep showing the session already on the presence until it has gone
-// quiet for StickyQuietPeriod, then switch to whichever session is now most
-// active. This stops the presence flickering between projects when several
-// Claude Code sessions run concurrently.
-func pickJSONLSession() (string, string, error) {
+// orderedJSONLSessions returns transcripts in display order. The currently
+// displayed transcript stays first while it is still active, so concurrent
+// sessions do not flicker; otherwise the newest transcript is first.
+func orderedJSONLSessions() ([]jsonlSession, error) {
 	files, err := listJSONLSessions()
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.HasPrefix(shownKey, "jl:") {
+		currentPath := strings.TrimPrefix(shownKey, "jl:")
+		for i, f := range files {
+			if f.path == currentPath && time.Since(f.modTime) < StickyQuietPeriod {
+				files[0], files[i] = files[i], files[0]
+				break
+			}
+		}
+	}
+	return files, nil
+}
+
+// pickJSONLSession chooses which transcript to display.
+func pickJSONLSession() (string, string, error) {
+	files, err := orderedJSONLSessions()
 	if err != nil {
 		return "", "", err
 	}
-
-	newest := files[0]
-
-	// Is the currently displayed session still one of the known transcripts?
-	if strings.HasPrefix(shownKey, "jl:") {
-		currentPath := strings.TrimPrefix(shownKey, "jl:")
-		for _, f := range files {
-			if f.path != currentPath {
-				continue
-			}
-			// Keep the current session unless it has been quiet too long.
-			if time.Since(f.modTime) < StickyQuietPeriod {
-				return f.path, f.projectPath, nil
-			}
-			break
-		}
-	}
-
-	return newest.path, newest.projectPath, nil
+	return files[0].path, files[0].projectPath, nil
 }
 
 // parseJSONLSession parses a JSONL file and extracts session data
@@ -470,15 +518,16 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 	}
 	defer file.Close()
 
+	type modelUsage struct {
+		input, output, cacheRead, cacheCreation int64
+	}
+
 	var (
-		totalInputTokens   int64
-		totalOutputTokens  int64
-		totalCacheRead     int64
-		totalCacheCreation int64
-		contextTokens      int64
-		lastModel          string
-		projectPath        string
-		firstTimestamp     string
+		usageByModel   = make(map[string]*modelUsage)
+		contextTokens  int64
+		lastModel      string
+		projectPath    string
+		firstTimestamp string
 	)
 
 	// A transcript line can be many MB (pasted images, large file reads / diffs).
@@ -503,10 +552,15 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 				if msg.Type == "assistant" && msg.Message.Model != "" {
 					lastModel = msg.Message.Model
 					usage := msg.Message.Usage
-					totalInputTokens += usage.InputTokens
-					totalOutputTokens += usage.OutputTokens
-					totalCacheRead += usage.CacheReadTokens
-					totalCacheCreation += usage.CacheCreationTokens
+					modelUse := usageByModel[lastModel]
+					if modelUse == nil {
+						modelUse = &modelUsage{}
+						usageByModel[lastModel] = modelUse
+					}
+					modelUse.input += usage.InputTokens
+					modelUse.output += usage.OutputTokens
+					modelUse.cacheRead += usage.CacheReadTokens
+					modelUse.cacheCreation += usage.CacheCreationTokens
 					// Context size: the latest request's input, cached tokens included.
 					contextTokens = usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 				}
@@ -522,7 +576,10 @@ func parseJSONLSession(jsonlPath, _ string) *SessionData {
 		return nil
 	}
 
-	totalCost := calculateCost(lastModel, totalInputTokens, totalOutputTokens, totalCacheRead, totalCacheCreation)
+	totalCost := 0.0
+	for model, usage := range usageByModel {
+		totalCost += calculateCost(model, usage.input, usage.output, usage.cacheRead, usage.cacheCreation)
+	}
 	modelName := formatModelName(lastModel)
 
 	// Displayed token count is the context size (the last request's input,
@@ -681,25 +738,33 @@ func readSessionData() *SessionData {
 	// crash must not mask a newer statusline session. Then JSONL as a last
 	// resort.
 	moduleFresh := fileNewer(moduleFilePath, dataFilePath)
+	var candidate *SessionData
+	var source string
 	if moduleFresh {
-		if data := readModuleData(); data != nil {
-			setSource(sourceModule)
-			return data
+		if candidate = readModuleData(); candidate != nil {
+			source = sourceModule
 		}
 	}
-	if data := readStatusLineData(); data != nil {
-		setSource(sourceStatusLine)
+	if candidate == nil {
+		if candidate = readStatusLineData(); candidate != nil {
+			source = sourceStatusLine
+		}
+	}
+	if candidate == nil && !moduleFresh {
+		if candidate = readModuleData(); candidate != nil {
+			source = sourceModule
+		}
+	}
+	if candidate != nil {
+		data, chosenSource := applyFileStickiness(candidate, source)
+		setSource(chosenSource)
 		return data
 	}
-	if !moduleFresh {
-		if data := readModuleData(); data != nil {
-			setSource(sourceModule)
-			return data
-		}
-	}
 
-	// Fall back to JSONL parsing, with sticky session selection.
-	jsonlPath, projectPath, err := pickJSONLSession()
+	// Fall back to JSONL parsing. Try candidates newest-first until one has
+	// usable data; a freshly created/aborted transcript can otherwise hide a
+	// valid session.
+	files, err := orderedJSONLSessions()
 	if err != nil {
 		return nil
 	}
@@ -712,18 +777,21 @@ func readSessionData() *SessionData {
 		fmt.Println("   See: https://github.com/Jerit3787/cc-discord-presence#statusline-setup")
 	}
 
-	session := parseJSONLSession(jsonlPath, projectPath)
-	if session == nil {
-		return nil
-	}
+	for _, file := range files {
+		session := parseJSONLSession(file.path, file.projectPath)
+		if session == nil {
+			continue
+		}
 
-	// Record which session now holds the presence; use the takeover time for the
-	// elapsed timer when the transcript had no parseable start timestamp.
-	takeover := markShown("jl:" + jsonlPath)
-	if session.StartTime.IsZero() {
-		session.StartTime = takeover
+		// Record which session now holds the presence; use the takeover time
+		// when the transcript had no parseable start timestamp.
+		takeover := markShown("jl:" + file.path)
+		if session.StartTime.IsZero() {
+			session.StartTime = takeover
+		}
+		return session
 	}
-	return session
+	return nil
 }
 
 // formatPresenceState builds the model | usage | cost line. Cloud sessions

@@ -16,6 +16,8 @@ const (
 	opHandshake = 0
 	opFrame     = 1
 	opClose     = 2
+	opPing      = 3
+	opPong      = 4
 
 	// maxFrameSize bounds the allocation for a single incoming frame. Discord
 	// activity payloads are small; anything larger is a protocol error.
@@ -130,7 +132,52 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("handshake failed: expected READY, got %q", string(payload))
 	}
 
+	go c.readLoop(conn)
 	return nil
+}
+
+// readLoop consumes post-handshake frames. It replies to PINGs, surfaces
+// ERROR responses, and marks the connection dead on CLOSE or EOF so the next
+// SetActivity can reconnect.
+func (c *Client) readLoop(conn Conn) {
+	for {
+		opcode, payload, err := receiveFrame(conn)
+		if err != nil {
+			c.markConnFailed(conn)
+			return
+		}
+
+		switch opcode {
+		case opClose:
+			c.markConnFailed(conn)
+			return
+		case opPing:
+			c.mu.Lock()
+			if c.conn == conn {
+				_ = c.sendRawLocked(opPong, payload)
+			}
+			c.mu.Unlock()
+		case opFrame:
+			var envelope struct {
+				Evt string `json:"evt"`
+			}
+			if json.Unmarshal(payload, &envelope) == nil && envelope.Evt == "ERROR" {
+				fmt.Fprintf(os.Stderr, "Discord RPC error: %s\n", string(payload))
+			}
+		}
+	}
+}
+
+// markConnFailed closes conn if it is still the active connection. The read
+// loop calls this on EOF/CLOSE; SetActivity then reports "not connected" and
+// the caller reconnects.
+func (c *Client) markConnFailed(conn Conn) {
+	c.mu.Lock()
+	if c.conn == conn {
+		conn.Close()
+		c.conn = nil
+	}
+	c.mu.Unlock()
 }
 
 // Reconnect closes any existing connection and establishes a fresh one.
@@ -233,7 +280,7 @@ func (c *Client) send(opcode int, data interface{}) error {
 	return c.sendLocked(opcode, data)
 }
 
-// sendLocked writes one complete frame. The caller must hold c.mu.
+// sendLocked writes one complete JSON frame. The caller must hold c.mu.
 func (c *Client) sendLocked(opcode int, data interface{}) error {
 	if c.conn == nil {
 		return fmt.Errorf("not connected")
@@ -242,6 +289,15 @@ func (c *Client) sendLocked(opcode int, data interface{}) error {
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return err
+	}
+	return c.sendRawLocked(opcode, payload)
+}
+
+// sendRawLocked writes one complete frame with an already-encoded payload. The
+// caller must hold c.mu.
+func (c *Client) sendRawLocked(opcode int, payload []byte) error {
+	if c.conn == nil {
+		return fmt.Errorf("not connected")
 	}
 
 	if err := c.conn.SetWriteDeadline(time.Now().Add(ioTimeout)); err != nil {
@@ -272,14 +328,22 @@ func (c *Client) sendLocked(opcode int, data interface{}) error {
 func (c *Client) receive() ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.conn == nil {
+		return nil, fmt.Errorf("not connected")
+	}
 	_, payload, err := c.receiveFrameLocked()
 	return payload, err
 }
 
 // receiveFrameLocked reads one complete frame. The caller must hold c.mu.
 func (c *Client) receiveFrameLocked() (int, []byte, error) {
+	return receiveFrame(c.conn)
+}
+
+// receiveFrame reads one complete frame from conn.
+func receiveFrame(conn Conn) (int, []byte, error) {
 	header := make([]byte, 8)
-	if _, err := io.ReadFull(c.conn, header); err != nil {
+	if _, err := io.ReadFull(conn, header); err != nil {
 		return 0, nil, err
 	}
 
@@ -291,7 +355,7 @@ func (c *Client) receiveFrameLocked() (int, []byte, error) {
 
 	payload := make([]byte, length)
 	if length > 0 {
-		if _, err := io.ReadFull(c.conn, payload); err != nil {
+		if _, err := io.ReadFull(conn, payload); err != nil {
 			return opcode, nil, err
 		}
 	}
